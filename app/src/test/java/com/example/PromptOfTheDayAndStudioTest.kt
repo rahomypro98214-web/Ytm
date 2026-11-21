@@ -165,4 +165,28 @@ class PromptOfTheDayAndStudioTest {
         composeRule.waitForIdle()
         assertEquals(0, generatedSceneIndex)
     }
+
+    @Test
+    fun studioVideoLoadingDisplaysPulseOrbAndStreamingPreview() {
+        composeRule.setContent {
+            SanaTheme {
+                StudioScreenContent(
+                    imageState = null,
+                    storyboardState = UiState.Loading,
+                    storyboardStreamingPreview = "جارٍ صياغة المشهد الافتتاحي...",
+                    sceneImages = emptyMap(),
+                    onGenerateImage = { _, _, _ -> },
+                    onGenerateVideoStoryboard = { _, _ -> },
+                    onGenerateSceneFrame = { _, _, _ -> }
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("studio_mode_video").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("studio_video_loading").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("ai_loading_pulse_orb").assertIsDisplayed()
+        composeRule.onNodeWithTag("ai_streaming_preview_text").assertIsDisplayed()
+    }
 }

@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
@@ -77,22 +78,42 @@ class SanaAiRepository {
             .build()
     }
 
+    private val chatSystemInstruction by lazy {
+        content {
+            text(
+                """
+                أنتِ «سنا»، مساعدة ذكية باللغة العربية الفصحى السلسة والدافئة.
+                دورك مساعدة المستخدم في:
+                1) المحادثة والإجابة بوضوح وإيجاز وأناقة.
+                2) الإجابة اعتمادًا على «ذاكرة سنا» (المصادر التي تعلمتها من المستخدم) عندما تكون ذات صلة، مع ذكر اسم المصدر بوضوح.
+                3) تلخيص النصوص في نقاط مركزة، أو الترجمة الطبيعية بين العربية والإنجليزية، أو اقتراح أفكار ومشاريع عملية.
+                استخدمي تنسيق Markdown بسيط (عناوين قصيرة أو نقاط أو خط عريض) عند الحاجة لسهولة القراءة.
+                لا تخترعي حقائق غير موجودة في المصادر عند الإجابة من الذاكرة؛ وإن لم تتوفر المعلومة في الذاكرة أجيبي من معرفتك العامة أو وضّحي ذلك بلطف.
+                """.trimIndent()
+            )
+        }
+    }
+
+    private val chatConfig by lazy {
+        generationConfig {
+            temperature = 0.7f
+            maxOutputTokens = 2048
+        }
+    }
+
     private val chatModel by lazy {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
-            systemInstruction = content {
-                text(
-                    """
-                    أنتِ «سنا»، مساعدة ذكية باللغة العربية الفصحى السلسة والدافئة.
-                    دورك مساعدة المستخدم في:
-                    1) المحادثة والإجابة بوضوح وإيجاز وأناقة.
-                    2) الإجابة اعتمادًا على «ذاكرة سنا» (المصادر التي تعلمتها من المستخدم) عندما تكون ذات صلة، مع ذكر اسم المصدر بوضوح.
-                    3) تلخيص النصوص في نقاط مركزة، أو الترجمة الطبيعية بين العربية والإنجليزية، أو اقتراح أفكار ومشاريع عملية.
-                    استخدمي تنسيق Markdown بسيط (عناوين قصيرة أو نقاط أو خط عريض) عند الحاجة لسهولة القراءة.
-                    لا تخترعي حقائق غير موجودة في المصادر عند الإجابة من الذاكرة؛ وإن لم تتوفر المعلومة في الذاكرة أجيبي من معرفتك العامة أو وضّحي ذلك بلطف.
-                    """.trimIndent()
-                )
-            }
+            generationConfig = chatConfig,
+            systemInstruction = chatSystemInstruction
+        )
+    }
+
+    private val fastChatModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = chatConfig,
+            systemInstruction = chatSystemInstruction
         )
     }
 
@@ -184,6 +205,16 @@ class SanaAiRepository {
         )
     }
 
+    private val fastKnowledgeAnalyzerModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = knowledgeSchema
+            }
+        )
+    }
+
     private val videoStoryboardModel by lazy {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
@@ -192,6 +223,72 @@ class SanaAiRepository {
                 responseSchema = storyboardSchema
             }
         )
+    }
+
+    private val fastVideoStoryboardModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = storyboardSchema
+            }
+        )
+    }
+
+    private val fastCourseGeneratorModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = courseSchema
+            }
+        )
+    }
+
+    private suspend fun generateWithFastFallback(
+        primary: com.google.firebase.ai.GenerativeModel,
+        fallback: com.google.firebase.ai.GenerativeModel,
+        prompt: String,
+        primaryTimeoutMs: Long = 35_000L,
+        fallbackTimeoutMs: Long = 25_000L,
+        onPartialJson: (suspend (String) -> Unit)? = null
+    ): String {
+        suspend fun collectStream(
+            targetModel: com.google.firebase.ai.GenerativeModel,
+            timeoutMs: Long
+        ): String {
+            val accumulated = StringBuilder()
+            withTimeout(timeoutMs) {
+                targetModel.generateContentStream(prompt).collect { chunk ->
+                    val piece = chunk.text.orEmpty()
+                    if (piece.isNotEmpty()) {
+                        accumulated.append(piece)
+                        onPartialJson?.invoke(accumulated.toString())
+                    }
+                }
+            }
+            val result = accumulated.toString().trim()
+            if (result.isBlank()) {
+                throw IllegalStateException("استجابة النموذج فارغة. حاول مرة أخرى.")
+            }
+            return result
+        }
+
+        return try {
+            collectStream(primary, primaryTimeoutMs)
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "Primary JSON model timed out; retrying once with gemini-3.5-flash-lite", e)
+            collectStream(fallback, fallbackTimeoutMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (isTransientOverloadError(e)) {
+                Log.w(TAG, "Primary JSON model temporarily unavailable; retrying with gemini-3.5-flash-lite", e)
+                collectStream(fallback, fallbackTimeoutMs)
+            } else {
+                throw e
+            }
+        }
     }
 
     private fun imageModelFor(aspectRatio: StudioAspectRatio) =
@@ -248,34 +345,36 @@ class SanaAiRepository {
             ChatMode.TRANSLATE -> "ترجمي النص التالي بين العربية والإنجليزية بأسلوب طبيعي وسلس يحافظ على المعنى الدقيق."
         }
 
-        val historySnippet = recentHistory.takeLast(8).joinToString("\n") { msg ->
-            val speaker = if (msg.role == "user") "المستخدم" else "سنا"
-            "$speaker: ${msg.text.take(600)}"
-        }
+        val chatHistory = recentHistory
+            .filter { it.text.isNotBlank() }
+            .takeLast(8)
+            .map { msg ->
+                content(role = if (msg.role == "user") "user" else "model") {
+                    text(msg.text.take(600))
+                }
+            }
 
-        val fullPrompt = buildString {
+        val currentTurnPrompt = buildString {
             val cleanPreferredName = preferredName?.trim().orEmpty()
             if (cleanPreferredName.isNotEmpty()) {
                 appendLine("الاسم المفضّل لمخاطبة المستخدم: $cleanPreferredName")
-                appendLine()
             }
             if (kbContext.isNotBlank()) {
                 appendLine(kbContext)
-                appendLine()
-            }
-            if (historySnippet.isNotBlank()) {
-                appendLine("سجل المحادثة القريب:")
-                appendLine(historySnippet)
-                appendLine()
             }
             appendLine("التوجيه: $modeDirective")
-            appendLine("رسالة المستخدم الحالية: $userMessage")
+            append("رسالة المستخدم: $userMessage")
         }
 
         val accumulated = StringBuilder()
-        try {
-            withTimeout(60_000L) {
-                chatModel.generateContentStream(fullPrompt).collect { chunk ->
+        suspend fun collectFromModel(
+            targetModel: com.google.firebase.ai.GenerativeModel,
+            timeoutMs: Long
+        ) {
+            accumulated.clear()
+            val chatSession = targetModel.startChat(history = chatHistory)
+            withTimeout(timeoutMs) {
+                chatSession.sendMessageStream(currentTurnPrompt).collect { chunk ->
                     val piece = chunk.text.orEmpty()
                     if (piece.isNotEmpty()) {
                         accumulated.append(piece)
@@ -283,24 +382,45 @@ class SanaAiRepository {
                     }
                 }
             }
+        }
+
+        try {
+            try {
+                collectFromModel(chatModel, 35_000L)
+            } catch (e: TimeoutCancellationException) {
+                if (accumulated.isNotBlank()) throw e
+                Log.w(TAG, "Primary model timed out; retrying once with gemini-3.5-flash-lite", e)
+                collectFromModel(fastChatModel, 25_000L)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (accumulated.isBlank() && isTransientOverloadError(e)) {
+                    Log.w(TAG, "Primary model temporarily unavailable; retrying with gemini-3.5-flash-lite", e)
+                    collectFromModel(fastChatModel, 25_000L)
+                } else {
+                    throw e
+                }
+            }
+
             if (accumulated.isBlank()) {
                 throw IllegalStateException("لم يُرجِع النموذج نصًا. حاول مرة أخرى.")
             }
         } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Streaming reply timed out", e)
-            throw IllegalStateException("انتهت مهلة الاتصال بالنموذج (60 ثانية). حاول مجددًا.")
+            Log.e(TAG, "Streaming reply timed out after fallback", e)
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Streaming reply failed", e)
-            throw e
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     suspend fun analyzeKnowledgeContent(
         rawText: String,
-        hintTitle: String? = null
-    ): KnowledgeAnalysisResult {
+        hintTitle: String? = null,
+        onStreamingProgress: (suspend (String) -> Unit)? = null
+    ): KnowledgeAnalysisResult = withContext(Dispatchers.IO) {
         val clipped = rawText.trim().take(10000)
         val prompt = buildString {
             appendLine("حلّلي النص التالي واستخرجي منه عنوانًا عربيًا موجزًا، وملخصًا مركزًا، وأهم الكلمات المفتاحية، وعدد الحقائق الرئيسية.")
@@ -310,11 +430,20 @@ class SanaAiRepository {
             appendLine("النص:")
             appendLine(clipped)
         }
-        return try {
-            val response = withTimeout(60_000L) {
-                knowledgeAnalyzerModel.generateContent(prompt)
-            }
-            val jsonStr = response.text ?: throw IllegalStateException("استجابة التحليل فارغة.")
+        try {
+            val jsonStr = generateWithFastFallback(
+                primary = knowledgeAnalyzerModel,
+                fallback = fastKnowledgeAnalyzerModel,
+                prompt = prompt,
+                onPartialJson = onStreamingProgress?.let { callback ->
+                    { raw ->
+                        val preview = extractPartialStringField(raw, "summary")
+                            ?: extractPartialStringField(raw, "title")
+                            ?: "جارٍ استخلاص الأفكار (${raw.length} حرف)…"
+                        callback(preview)
+                    }
+                }
+            )
             val json = JSONObject(jsonStr)
             val title = json.optString("title").ifBlank { hintTitle ?: "مصدر معرفي" }
             val summary = json.optString("summary").ifBlank { clipped.take(220) }
@@ -336,16 +465,19 @@ class SanaAiRepository {
             )
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Knowledge analysis timed out", e)
-            throw IllegalStateException("انتهت مهلة تحليل النص.")
+            throw IllegalStateException("انتهت مهلة تحليل النص. تحقّق من الاتصال وأعد المحاولة.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Knowledge analysis failed", e)
-            throw e
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         }
     }
 
-    suspend fun generateCourse(topic: String): CourseUi {
+    suspend fun generateCourse(
+        topic: String,
+        onStreamingProgress: (suspend (String) -> Unit)? = null
+    ): CourseUi = withContext(Dispatchers.IO) {
         val prompt = """
             أنشئي دورة تعليمية تفاعلية قصيرة وممتعة باللغة العربية حول الموضوع التالي: «$topic».
             الشروط:
@@ -353,11 +485,20 @@ class SanaAiRepository {
             - 3 أسئلة اختيار من متعدد تغطي ما ورد في الدروس، ولكل سؤال 4 خيارات وفهرس إجابة صحيحة (0..3) وتفسير موجز.
         """.trimIndent()
 
-        return try {
-            val response = withTimeout(60_000L) {
-                courseGeneratorModel.generateContent(prompt)
-            }
-            val jsonStr = response.text ?: throw IllegalStateException("لم يُرجِع النموذج بيانات الدورة.")
+        try {
+            val jsonStr = generateWithFastFallback(
+                primary = courseGeneratorModel,
+                fallback = fastCourseGeneratorModel,
+                prompt = prompt,
+                onPartialJson = onStreamingProgress?.let { callback ->
+                    { raw ->
+                        val preview = extractPartialStringField(raw, "description")
+                            ?: extractPartialStringField(raw, "title")
+                            ?: "جارٍ تأليف الدروس والاختبار…"
+                        callback(preview)
+                    }
+                }
+            )
             val json = JSONObject(jsonStr)
             val title = json.optString("title").ifBlank { topic }
             val description = json.optString("description").ifBlank { "دورة تفاعلية مولّدة في $topic" }
@@ -416,12 +557,12 @@ class SanaAiRepository {
             )
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Course generation timed out", e)
-            throw IllegalStateException("انتهت مهلة إنشاء الدورة (60 ثانية).")
+            throw IllegalStateException("انتهت مهلة إنشاء الدورة. تحقّق من الاتصال ثم حاول مرة أخرى.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Course generation failed", e)
-            throw e
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         }
     }
 
@@ -429,13 +570,13 @@ class SanaAiRepository {
         prompt: String,
         aspectRatio: StudioAspectRatio = StudioAspectRatio.SQUARE,
         referenceBitmap: Bitmap? = null
-    ): Bitmap {
+    ): Bitmap = withContext(Dispatchers.IO) {
         val cleanPrompt = prompt.trim()
         if (cleanPrompt.isBlank()) {
             throw IllegalArgumentException("أدخل وصفًا واضحًا للصورة أولًا.")
         }
         val imageModel = imageModelFor(aspectRatio)
-        return try {
+        try {
             val response = withTimeout(60_000L) {
                 if (referenceBitmap != null) {
                     imageModel.generateContent(
@@ -455,22 +596,23 @@ class SanaAiRepository {
             bitmap ?: throw IllegalStateException("لم يُرجِع النموذج صورة لهذا الوصف. جرّب صياغة أخرى.")
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Image generation timed out", e)
-            throw IllegalStateException("انتهت مهلة توليد الصورة (60 ثانية). حاول مرة أخرى.")
+            throw IllegalStateException("انتهت مهلة توليد الصورة (60 ثانية). حاول مرة أخرى.", e)
         } catch (e: QuotaExceededException) {
             Log.e(TAG, "Image generation quota exceeded", e)
-            throw IllegalStateException("تم تجاوز حد الاستخدام أو يتطلب المشروع تفعيل خطة Blaze لتوليد الصور.")
+            throw IllegalStateException("تم تجاوز حد الاستخدام أو يتطلب المشروع تفعيل خطة Blaze لتوليد الصور.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Image generation failed", e)
-            throw e
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         }
     }
 
     suspend fun generateVideoStoryboard(
         topic: String,
-        aspectRatio: StudioAspectRatio = StudioAspectRatio.LANDSCAPE
-    ): VideoStoryboardPlan {
+        aspectRatio: StudioAspectRatio = StudioAspectRatio.LANDSCAPE,
+        onStreamingProgress: (suspend (String) -> Unit)? = null
+    ): VideoStoryboardPlan = withContext(Dispatchers.IO) {
         val cleanTopic = topic.trim()
         if (cleanTopic.isBlank()) {
             throw IllegalArgumentException("أدخل فكرة الفيديو أولًا.")
@@ -481,12 +623,20 @@ class SanaAiRepository {
             اجعلي كل مشهد يتضمن وصفًا بصريًا دقيقًا يصلح لتوليد لقطة فنية، وحركة كاميرا واضحة، وتعليقًا صوتيًا عربيًا جذّابًا ومختصرًا يناسب القراءة الصوتية.
         """.trimIndent()
 
-        return try {
-            val response = withTimeout(60_000L) {
-                videoStoryboardModel.generateContent(prompt)
-            }
-            val jsonStr = response.text
-                ?: throw IllegalStateException("لم يُرجِع النموذج مخطط الفيديو.")
+        try {
+            val jsonStr = generateWithFastFallback(
+                primary = videoStoryboardModel,
+                fallback = fastVideoStoryboardModel,
+                prompt = prompt,
+                onPartialJson = onStreamingProgress?.let { callback ->
+                    { raw ->
+                        val preview = extractPartialStringField(raw, "mood")
+                            ?: extractPartialStringField(raw, "title")
+                            ?: "جارٍ كتابة مشاهد الفيديو…"
+                        callback(preview)
+                    }
+                }
+            )
             val json = JSONObject(jsonStr)
             val title = json.optString("title").ifBlank { cleanTopic }
             val mood = json.optString("mood").ifBlank { "بصري حديث وإلهامي" }
@@ -522,12 +672,12 @@ class SanaAiRepository {
             )
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Video storyboard generation timed out", e)
-            throw IllegalStateException("انتهت مهلة تصميم مشاهد الفيديو (60 ثانية).")
+            throw IllegalStateException("انتهت مهلة تصميم مشاهد الفيديو. تحقّق من الاتصال ثم أعد المحاولة.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Video storyboard generation failed", e)
-            throw e
+            throw IllegalStateException(formatAiErrorMessage(e), e)
         }
     }
 
@@ -607,5 +757,60 @@ class SanaAiRepository {
             .split(Regex("[\\s،.,؛:!؟?\"'()\\-—/]+"))
             .map { it.trim().lowercase() }
             .filter { it.length > 2 }
+    }
+}
+
+internal fun extractPartialStringField(partialJson: String, fieldName: String): String? {
+    val keyPattern = Regex("\"${Regex.escape(fieldName)}\"\\s*:\\s*\"([^\"]{2,})")
+    val raw = keyPattern.find(partialJson)?.groupValues?.getOrNull(1) ?: return null
+    return raw
+        .replace("\\n", " ")
+        .replace("\\\"", "\"")
+        .trim()
+        .takeIf { it.length >= 2 }
+}
+
+internal fun isTransientOverloadError(error: Throwable): Boolean {
+    val msg = generateSequence(error) { it.cause }
+        .mapNotNull { it.message }
+        .joinToString(" ")
+        .lowercase()
+    return msg.contains("503") ||
+        msg.contains("500") ||
+        msg.contains("unavailable") ||
+        msg.contains("overloaded") ||
+        msg.contains("deadline") ||
+        msg.contains("timeout")
+}
+
+internal fun formatAiErrorMessage(error: Throwable): String {
+    if (error is TimeoutCancellationException) {
+        return "استغرق الاتصال بالذكاء الاصطناعي وقتًا طويلًا وانتهت المهلة. تأكد من استقرار الإنترنت ثم اضغط «إعادة المحاولة»."
+    }
+    if (error is QuotaExceededException) {
+        return "تم تجاوز الحد المسموح حاليًا لطلبات الذكاء الاصطناعي. انتظر قليلًا ثم أعد المحاولة."
+    }
+    val fullMsg = generateSequence(error) { it.cause }
+        .mapNotNull { it.message }
+        .joinToString(" | ")
+    val lower = fullMsg.lowercase()
+    val localized = error.localizedMessage?.takeIf { it.isNotBlank() }
+    return when {
+        lower.contains("app check") || lower.contains("appcheck") || lower.contains("attestation") || lower.contains("403") ->
+            "فشل التحقق الأمني (App Check 403). تأكد من تشغيل النسخة الرسمية المهيأة داخل AI Studio أو إعادة التهيئة."
+        lower.contains("quota") || lower.contains("429") || lower.contains("resource_exhausted") ->
+            "تم تجاوز حد الاستخدام المسموح للذكاء الاصطناعي حاليًا. حاول بعد قليل."
+        lower.contains("unable to resolve host") ||
+            lower.contains("unknownhost") ||
+            lower.contains("failed to connect") ||
+            lower.contains("network") ||
+            lower.contains("socket") ->
+            "تعذر الوصول إلى خوادم الذكاء الاصطناعي. تحقّق من الاتصال بالإنترنت أو جرّب إيقاف VPN مؤقتًا ثم أعد المحاولة."
+        error is org.json.JSONException || lower.contains("json") ->
+            "وصلت استجابة غير مكتملة من النموذج. اضغط «إعادة المحاولة»."
+        localized != null ->
+            localized
+        else ->
+            "تعذر إتمام طلب الذكاء الاصطناعي حاليًا. اضغط «إعادة المحاولة»."
     }
 }

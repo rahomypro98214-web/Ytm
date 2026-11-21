@@ -112,11 +112,13 @@ fun StudioScreen(
 ) {
     val imageState by viewModel.studioImageState.collectAsStateWithLifecycle()
     val storyboardState by viewModel.studioStoryboardState.collectAsStateWithLifecycle()
+    val storyboardStreamingPreview by viewModel.storyboardStreamingPreview.collectAsStateWithLifecycle()
     val sceneImages by viewModel.studioSceneImages.collectAsStateWithLifecycle()
 
     StudioScreenContent(
         imageState = imageState,
         storyboardState = storyboardState,
+        storyboardStreamingPreview = storyboardStreamingPreview,
         sceneImages = sceneImages,
         onGenerateImage = { prompt, aspect, refBitmap ->
             viewModel.generateStudioImage(prompt, aspect, refBitmap)
@@ -140,10 +142,17 @@ internal fun StudioScreenContent(
     onGenerateVideoStoryboard: (String, StudioAspectRatio) -> Unit,
     onGenerateSceneFrame: (Int, String, StudioAspectRatio) -> Unit,
     modifier: Modifier = Modifier,
+    storyboardStreamingPreview: String? = null,
     ttsController: TextToSpeechController = rememberTextToSpeechController()
 ) {
     val context = LocalContext.current
     val sanaColors = LocalSanaColors.current
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            ttsController.stop()
+        }
+    }
 
     var activeMode by rememberSaveable { mutableStateOf(StudioMode.IMAGE) }
     var imagePrompt by rememberSaveable { mutableStateOf("") }
@@ -354,9 +363,10 @@ internal fun StudioScreenContent(
                                 Text(stringResource(R.string.studio_pick_reference_image))
                             }
 
-                            if (referenceBitmap != null) {
+                            val refBmp = referenceBitmap
+                            if (refBmp != null) {
                                 Image(
-                                    bitmap = referenceBitmap!!.asImageBitmap(),
+                                    bitmap = refBmp.asImageBitmap(),
                                     contentDescription = stringResource(R.string.studio_pick_reference_image),
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier
@@ -394,29 +404,10 @@ internal fun StudioScreenContent(
             // Image Generation Result / Loading / Error
             when (imageState) {
                     is UiState.Loading -> {
-                        Card(
-                            shape = MaterialTheme.shapes.large,
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = BorderStroke(1.dp, sanaColors.tealAccent),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("studio_image_loading")
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                CircularProgressIndicator(color = sanaColors.tealDeep)
-                                Text(
-                                    text = stringResource(R.string.studio_generating_image),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
+                        com.example.ui.components.AiPulseLoadingCard(
+                            title = stringResource(R.string.studio_generating_image),
+                            modifier = Modifier.testTag("studio_image_loading")
+                        )
                     }
 
                     is UiState.Error -> {
@@ -585,29 +576,11 @@ internal fun StudioScreenContent(
 
             when (storyboardState) {
                 is UiState.Loading -> {
-                    Card(
-                        shape = MaterialTheme.shapes.large,
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, sanaColors.tealAccent),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("studio_video_loading")
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            CircularProgressIndicator(color = sanaColors.tealDeep)
-                            Text(
-                                text = stringResource(R.string.studio_generating_video),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                    com.example.ui.components.AiPulseLoadingCard(
+                        title = stringResource(R.string.studio_generating_video),
+                        streamingPreview = storyboardStreamingPreview,
+                        modifier = Modifier.testTag("studio_video_loading")
+                    )
                 }
 
                 is UiState.Error -> {
@@ -663,6 +636,7 @@ private fun AnimatedVideoStoryboardPlayer(
     sceneImages: Map<Int, UiState<Bitmap>>,
     ttsController: TextToSpeechController
 ) {
+    if (plan.scenes.isEmpty()) return
     val context = LocalContext.current
     val sanaColors = LocalSanaColors.current
     var isPlaying by remember(plan) { mutableStateOf(false) }
@@ -957,15 +931,37 @@ private fun ScenePlanCard(
 
 private fun decodeSampledBitmap(context: Context, uri: Uri): Bitmap? {
     return runCatching {
+        val maxDim = 1024
+        val boundsOpts = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
         context.contentResolver.openInputStream(uri)?.use { stream ->
-            val original = BitmapFactory.decodeStream(stream) ?: return null
-            val maxDim = 1024
-            if (original.width <= maxDim && original.height <= maxDim) return original
-            val scale = maxDim.toFloat() / maxOf(original.width, original.height)
+            BitmapFactory.decodeStream(stream, null, boundsOpts)
+        }
+        val rawWidth = boundsOpts.outWidth
+        val rawHeight = boundsOpts.outHeight
+        if (rawWidth <= 0 || rawHeight <= 0) return@runCatching null
+
+        var sampleSize = 1
+        while (rawWidth / sampleSize > maxDim * 2 || rawHeight / sampleSize > maxDim * 2) {
+            sampleSize *= 2
+        }
+
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        }
+        val sampled = context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, decodeOpts)
+        } ?: return@runCatching null
+
+        if (sampled.width <= maxDim && sampled.height <= maxDim) {
+            sampled
+        } else {
+            val scale = maxDim.toFloat() / maxOf(sampled.width, sampled.height)
             Bitmap.createScaledBitmap(
-                original,
-                (original.width * scale).toInt().coerceAtLeast(1),
-                (original.height * scale).toInt().coerceAtLeast(1),
+                sampled,
+                (sampled.width * scale).toInt().coerceAtLeast(1),
+                (sampled.height * scale).toInt().coerceAtLeast(1),
                 true
             )
         }

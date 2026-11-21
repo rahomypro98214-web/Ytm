@@ -109,4 +109,40 @@ interface ChatMessageDao {
             insertAll(messages)
         }
     }
+
+    @Query(
+        """
+        SELECT
+            m.conversationId AS conversationId,
+            COALESCE(c.title, '') AS conversationTitle,
+            m.localId AS matchedMessageId,
+            m.role AS matchedRole,
+            m.text AS matchedText,
+            m.sourceTitle AS matchedSourceTitle,
+            m.createdAtMillis AS matchedAtMillis,
+            COALESCE(c.messageCount, 1) AS messageCount,
+            CASE
+                WHEN LOWER(m.text) LIKE :escapedPattern ESCAPE '\'
+                  OR LOWER(COALESCE(m.sourceTitle, '')) LIKE :escapedPattern ESCAPE '\'
+                THEN 1
+                ELSE 0
+            END AS matchedInMessageBody
+        FROM chat_messages m
+        LEFT JOIN chat_conversations c
+            ON m.userId = c.userId AND m.conversationId = c.conversationId
+        WHERE m.userId = :userId
+          AND (
+              LOWER(m.text) LIKE :escapedPattern ESCAPE '\'
+              OR LOWER(COALESCE(m.sourceTitle, '')) LIKE :escapedPattern ESCAPE '\'
+              OR LOWER(COALESCE(c.title, '')) LIKE :escapedPattern ESCAPE '\'
+          )
+        ORDER BY m.createdAtMillis DESC, m.localId DESC
+        LIMIT :limit
+        """
+    )
+    fun searchHistory(
+        userId: String,
+        escapedPattern: String,
+        limit: Int = 80
+    ): Flow<List<ChatHistorySearchMatch>>
 }

@@ -193,13 +193,14 @@ fun AuthScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        if (!errorMessage.isNullOrBlank()) {
+                        val activeError = errorMessage
+                        if (!activeError.isNullOrBlank()) {
                             Surface(
                                 shape = MaterialTheme.shapes.small,
                                 color = sanaColors.errorSurface
                             ) {
                                 Text(
-                                    text = errorMessage!!,
+                                    text = activeError,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = sanaColors.errorText,
                                     modifier = Modifier

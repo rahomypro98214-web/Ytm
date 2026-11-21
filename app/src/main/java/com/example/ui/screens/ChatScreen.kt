@@ -71,6 +71,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SuggestionChip
@@ -112,6 +113,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.R
 import com.example.data.local.ChatConversationEntity
+import com.example.data.local.ChatHistorySearchMatch
 import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.local.SanaDatabase
 import com.example.data.model.ChatMessage
@@ -119,33 +121,42 @@ import com.example.data.model.ChatMode
 import com.example.data.model.UiState
 import com.example.data.repository.LocalChatRepository
 import com.example.data.repository.UserPreferencesRepository
+import com.example.data.repository.formatAiErrorMessage
+import com.example.data.repository.isTransientOverloadError
 import com.example.ui.SanaViewModel
 import com.example.ui.components.ConversationHistorySheet
 import com.example.ui.components.PromptOfTheDayCarousel
 import com.example.ui.components.SanaMarkdownText
 import com.example.ui.components.SaveConversationDialog
 import com.example.ui.components.SettingsMenuDialog
+import com.example.ui.components.SpeechToTextController
 import com.example.ui.components.TextToSpeechController
 import com.example.ui.components.mergeDictatedText
 import com.example.ui.components.rememberSpeechToTextController
 import com.example.ui.components.rememberTextToSpeechController
 import com.example.ui.theme.LocalSanaColors
 import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 private const val CHAT_TAG = "FirebaseChatVM"
@@ -174,12 +185,32 @@ class FirebaseChatViewModel(
                 initialValue = null
             ) ?: MutableStateFlow<String?>(null).asStateFlow()
 
+    private val chatConfig by lazy {
+        generationConfig {
+            temperature = 0.7f
+            maxOutputTokens = 2048
+        }
+    }
+
+    private val chatSystemInstruction by lazy {
+        content {
+            text("أنت سنا، مساعد ذكي بالعربية. قدّم إجابات واضحة وموجزة ومفيدة.")
+        }
+    }
+
     private val model by lazy {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
-            systemInstruction = content {
-                text("أنت سنا، مساعد ذكي بالعربية. قدّم إجابات واضحة وموجزة ومفيدة.")
-            }
+            generationConfig = chatConfig,
+            systemInstruction = chatSystemInstruction
+        )
+    }
+
+    private val fastModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = chatConfig,
+            systemInstruction = chatSystemInstruction
         )
     }
 
@@ -188,6 +219,20 @@ class FirebaseChatViewModel(
 
     val savedConversations: StateFlow<List<ChatConversationEntity>> =
         localChatRepo.observeConversations(LOCAL_CHAT_USER_ID)
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000L),
+                initialValue = emptyList()
+            )
+
+    private val _historySearchQuery = MutableStateFlow("")
+    val historySearchQuery: StateFlow<String> = _historySearchQuery.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val historySearchResults: StateFlow<List<ChatHistorySearchMatch>> =
+        _historySearchQuery.flatMapLatest { query ->
+            localChatRepo.searchHistory(LOCAL_CHAT_USER_ID, query)
+        }
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5000L),
@@ -227,8 +272,21 @@ class FirebaseChatViewModel(
     private val _streamingText = MutableStateFlow<String?>(null)
     val streamingText: StateFlow<String?> = _streamingText.asStateFlow()
 
+    private val _streamingConversationId = MutableStateFlow<String?>(null)
+    private var activeChatJob: Job? = null
+
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    val isSendingActiveConversation: StateFlow<Boolean> =
+        combine(_isSending, _streamingConversationId, _activeConversationId) { sending, streamConv, activeConv ->
+            sending && (streamConv == null || streamConv == activeConv)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
+
+    val activeStreamingText: StateFlow<String?> =
+        combine(_streamingText, _streamingConversationId, _activeConversationId) { reply, streamConv, activeConv ->
+            if (streamConv == null || streamConv == activeConv) reply else null
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -237,8 +295,19 @@ class FirebaseChatViewModel(
         _error.value = null
     }
 
+    fun stopGeneration() {
+        activeChatJob?.cancel()
+        activeChatJob = null
+        _streamingText.value = null
+        _streamingConversationId.value = null
+        _isSending.value = false
+    }
+
     fun clearMessages() {
         val conversationId = _activeConversationId.value
+        if (_streamingConversationId.value == conversationId) {
+            stopGeneration()
+        }
         _error.value = null
         viewModelScope.launch {
             localChatRepo.clearMessages(LOCAL_CHAT_USER_ID, conversationId)
@@ -279,6 +348,14 @@ class FirebaseChatViewModel(
         }
     }
 
+    fun updateHistorySearchQuery(query: String) {
+        _historySearchQuery.value = query
+    }
+
+    fun clearHistorySearch() {
+        _historySearchQuery.value = ""
+    }
+
     fun deleteConversation(conversationId: String) {
         viewModelScope.launch {
             localChatRepo.deleteConversation(LOCAL_CHAT_USER_ID, conversationId)
@@ -311,9 +388,10 @@ class FirebaseChatViewModel(
         val historySnapshot = messages.value
         _isSending.value = true
         _error.value = null
+        _streamingConversationId.value = conversationId
         _streamingText.value = ""
 
-        viewModelScope.launch {
+        activeChatJob = viewModelScope.launch {
             localChatRepo.insertMessage(
                 userId = LOCAL_CHAT_USER_ID,
                 role = "user",
@@ -322,21 +400,49 @@ class FirebaseChatViewModel(
             )
 
             val accumulated = StringBuilder()
-            try {
-                val chatSession = model.startChat(
-                    history = historySnapshot.takeLast(10).map { msg ->
-                        content(role = if (msg.isUser) "user" else "model") { text(msg.text) }
+            val historyContents = historySnapshot
+                .filter { it.text.isNotBlank() }
+                .takeLast(8)
+                .map { msg ->
+                    content(role = if (msg.isUser) "user" else "model") {
+                        text(msg.text.take(600))
                     }
-                )
-                withTimeout(60_000L) {
-                    chatSession.sendMessageStream(text).collect { chunk ->
-                        val piece = chunk.text.orEmpty()
-                        if (piece.isNotEmpty()) {
-                            accumulated.append(piece)
-                            _streamingText.value = accumulated.toString()
+                }
+
+            suspend fun streamFrom(targetModel: GenerativeModel, timeoutMs: Long) {
+                accumulated.clear()
+                withContext(Dispatchers.IO) {
+                    val chatSession = targetModel.startChat(history = historyContents)
+                    withTimeout(timeoutMs) {
+                        chatSession.sendMessageStream(text).collect { chunk ->
+                            val piece = chunk.text.orEmpty()
+                            if (piece.isNotEmpty()) {
+                                accumulated.append(piece)
+                                _streamingText.value = accumulated.toString()
+                            }
                         }
                     }
                 }
+            }
+
+            try {
+                try {
+                    streamFrom(model, 35_000L)
+                } catch (e: TimeoutCancellationException) {
+                    if (accumulated.isNotBlank()) throw e
+                    Log.w(CHAT_TAG, "Primary model timed out; retrying once with gemini-3.5-flash-lite", e)
+                    streamFrom(fastModel, 25_000L)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (accumulated.isBlank() && isTransientOverloadError(e)) {
+                        Log.w(CHAT_TAG, "Primary model temporarily unavailable; retrying with gemini-3.5-flash-lite", e)
+                        streamFrom(fastModel, 25_000L)
+                    } else {
+                        throw e
+                    }
+                }
+
                 if (accumulated.isNotBlank()) {
                     localChatRepo.insertMessage(
                         userId = LOCAL_CHAT_USER_ID,
@@ -349,15 +455,29 @@ class FirebaseChatViewModel(
                 }
             } catch (e: TimeoutCancellationException) {
                 Log.e(CHAT_TAG, "Firebase AI chat timed out", e)
-                _error.value = "انتهت مهلة الاتصال بالذكاء الاصطناعي (60 ثانية)."
+                _error.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
+                if (accumulated.isNotBlank()) {
+                    runCatching {
+                        withContext(kotlinx.coroutines.NonCancellable) {
+                            localChatRepo.insertMessage(
+                                userId = LOCAL_CHAT_USER_ID,
+                                role = "model",
+                                text = accumulated.toString(),
+                                conversationId = conversationId
+                            )
+                        }
+                    }
+                }
                 throw e
             } catch (e: Exception) {
                 Log.e(CHAT_TAG, "Firebase AI chat failed", e)
-                _error.value = e.localizedMessage ?: "حدث خطأ أثناء الاتصال بـ Firebase AI."
+                _error.value = formatAiErrorMessage(e)
             } finally {
                 _streamingText.value = null
+                _streamingConversationId.value = null
                 _isSending.value = false
+                activeChatJob = null
             }
         }
     }
@@ -388,12 +508,14 @@ fun ChatScreen(
     chatViewModel: FirebaseChatViewModel = viewModel(factory = FirebaseChatViewModel.Factory)
 ) {
     val messages by chatViewModel.messages.collectAsStateWithLifecycle()
-    val streamingText by chatViewModel.streamingText.collectAsStateWithLifecycle()
-    val isSending by chatViewModel.isSending.collectAsStateWithLifecycle()
+    val streamingText by chatViewModel.activeStreamingText.collectAsStateWithLifecycle()
+    val isSending by chatViewModel.isSendingActiveConversation.collectAsStateWithLifecycle()
     val error by chatViewModel.error.collectAsStateWithLifecycle()
     val preferredName by chatViewModel.preferredName.collectAsStateWithLifecycle()
     val savedConversations by chatViewModel.savedConversations.collectAsStateWithLifecycle()
     val activeConversationId by chatViewModel.activeConversationId.collectAsStateWithLifecycle()
+    val historySearchQuery by chatViewModel.historySearchQuery.collectAsStateWithLifecycle()
+    val historySearchResults by chatViewModel.historySearchResults.collectAsStateWithLifecycle()
 
     ChatScreenContent(
         messagesState = UiState.Success(messages),
@@ -421,7 +543,11 @@ fun ChatScreen(
         onSaveConversation = { chatViewModel.saveCurrentConversation(it) },
         onSelectConversation = { chatViewModel.selectConversation(it) },
         onStartNewConversation = { chatViewModel.startNewConversation() },
-        onDeleteConversation = { chatViewModel.deleteConversation(it) }
+        onDeleteConversation = { chatViewModel.deleteConversation(it) },
+        onStopGeneration = { chatViewModel.stopGeneration() },
+        historySearchQuery = historySearchQuery,
+        historySearchResults = historySearchResults,
+        onHistorySearchQueryChange = { chatViewModel.updateHistorySearchQuery(it) }
     )
 }
 
@@ -435,13 +561,15 @@ fun ChatScreen(
 ) {
     val messagesState by viewModel.chatMessagesState.collectAsStateWithLifecycle()
     val chatMode by viewModel.chatMode.collectAsStateWithLifecycle()
-    val streamingReply by viewModel.streamingReply.collectAsStateWithLifecycle()
+    val streamingReply by viewModel.activeStreamingReply.collectAsStateWithLifecycle()
     val streamingSource by viewModel.streamingSource.collectAsStateWithLifecycle()
-    val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+    val isSending by viewModel.isSendingActiveConversation.collectAsStateWithLifecycle()
     val chatError by viewModel.chatError.collectAsStateWithLifecycle()
     val preferredName by viewModel.preferredName.collectAsStateWithLifecycle()
     val savedConversations by viewModel.savedConversations.collectAsStateWithLifecycle()
     val activeConversationId by viewModel.activeConversationId.collectAsStateWithLifecycle()
+    val historySearchQuery by viewModel.historySearchQuery.collectAsStateWithLifecycle()
+    val historySearchResults by viewModel.historySearchResults.collectAsStateWithLifecycle()
 
     val mappedState: UiState<List<ChatDisplayMessage>> = remember(messagesState) {
         when (val state = messagesState) {
@@ -478,7 +606,11 @@ fun ChatScreen(
         onSaveConversation = { viewModel.saveCurrentConversation(it) },
         onSelectConversation = { viewModel.selectConversation(it) },
         onStartNewConversation = { viewModel.startNewConversation() },
-        onDeleteConversation = { viewModel.deleteConversation(it) }
+        onDeleteConversation = { viewModel.deleteConversation(it) },
+        onStopGeneration = { viewModel.stopChatGeneration() },
+        historySearchQuery = historySearchQuery,
+        historySearchResults = historySearchResults,
+        onHistorySearchQueryChange = { viewModel.updateHistorySearchQuery(it) }
     )
 }
 
@@ -513,7 +645,12 @@ internal fun ChatScreenContent(
     onSaveConversation: ((String) -> Unit)? = null,
     onSelectConversation: ((String) -> Unit)? = null,
     onStartNewConversation: (() -> Unit)? = null,
-    onDeleteConversation: ((String) -> Unit)? = null
+    onDeleteConversation: ((String) -> Unit)? = null,
+    onStopGeneration: (() -> Unit)? = null,
+    historySearchQuery: String = "",
+    historySearchResults: List<ChatHistorySearchMatch> = emptyList(),
+    onHistorySearchQueryChange: ((String) -> Unit)? = null,
+    speechController: SpeechToTextController? = null
 ) {
     val context = LocalContext.current
     val sanaColors = LocalSanaColors.current
@@ -525,9 +662,11 @@ internal fun ChatScreenContent(
     var showChatOptionsMenu by remember { mutableStateOf(false) }
     var showHistorySheet by remember { mutableStateOf(false) }
     var showSaveConversationDialog by remember { mutableStateOf(false) }
+    var searchScrollTarget by remember { mutableStateOf<ChatHistorySearchMatch?>(null) }
+    var highlightedMessageKey by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
-    val speechController = rememberSpeechToTextController(
+    val defaultSpeechController = rememberSpeechToTextController(
         onPartialResult = { partial ->
             inputText = mergeDictatedText(dictationBaseText, partial)
         },
@@ -537,6 +676,14 @@ internal fun ChatScreenContent(
             dictationBaseText = merged
         }
     )
+    val activeSpeechController = speechController ?: defaultSpeechController
+
+    androidx.compose.runtime.DisposableEffect(activeSpeechController, ttsController) {
+        onDispose {
+            ttsController.stop()
+            activeSpeechController.stopListening()
+        }
+    }
 
     val quickPrompts = remember {
         listOf(
@@ -557,15 +704,52 @@ internal fun ChatScreenContent(
         ttsController.speakingMessageId != null &&
             ttsController.speakingMessageId == messages.lastOrNull()?.id
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.id, showTypingBubble, isLastMessageSpeaking) {
-        if (totalMessageItems > 0) {
-            listState.animateScrollToItem(totalMessageItems)
+    LaunchedEffect(searchScrollTarget, activeConversationId, messages) {
+        val target = searchScrollTarget ?: return@LaunchedEffect
+        if (target.conversationId == activeConversationId && messages.isNotEmpty()) {
+            val matchIndex = messages.indexOfFirst { msg ->
+                msg.id == "local_${target.matchedMessageId}" || msg.text == target.matchedText
+            }
+            if (matchIndex >= 0) {
+                val matchedId = messages[matchIndex].id
+                highlightedMessageKey = matchedId
+                runCatching {
+                    // Index + 1 accounts for prompt_of_day_header item at LazyColumn index 0
+                    listState.animateScrollToItem(matchIndex + 1)
+                }
+                searchScrollTarget = null
+            }
         }
     }
 
-    LaunchedEffect(streamingReply) {
-        if (!streamingReply.isNullOrEmpty() && totalMessageItems > 0) {
-            listState.scrollToItem(totalMessageItems)
+    LaunchedEffect(highlightedMessageKey) {
+        if (highlightedMessageKey != null) {
+            delay(3500L)
+            highlightedMessageKey = null
+        }
+    }
+
+    LaunchedEffect(
+        messages.size,
+        messages.lastOrNull()?.id,
+        showTypingBubble,
+        streamingReply?.length ?: 0,
+        isLastMessageSpeaking
+    ) {
+        if (searchScrollTarget == null && totalMessageItems > 0) {
+            val totalInList = listState.layoutInfo.totalItemsCount
+            val targetIdx = if (totalInList > 0) {
+                minOf(totalMessageItems, totalInList - 1)
+            } else {
+                totalMessageItems
+            }
+            runCatching {
+                if (!streamingReply.isNullOrEmpty()) {
+                    listState.scrollToItem(targetIdx)
+                } else {
+                    listState.animateScrollToItem(targetIdx)
+                }
+            }
         }
     }
 
@@ -623,10 +807,14 @@ internal fun ChatScreenContent(
             hasActiveMessages = messages.isNotEmpty(),
             onSelectConversation = { convId ->
                 ttsController.stop()
+                searchScrollTarget = null
+                highlightedMessageKey = null
                 onSelectConversation(convId)
             },
             onStartNewConversation = {
                 ttsController.stop()
+                searchScrollTarget = null
+                highlightedMessageKey = null
                 onStartNewConversation?.invoke()
             },
             onRequestSaveCurrent = {
@@ -636,7 +824,20 @@ internal fun ChatScreenContent(
             onDeleteConversation = { convId ->
                 onDeleteConversation?.invoke(convId)
             },
-            onDismiss = { showHistorySheet = false }
+            onDismiss = {
+                showHistorySheet = false
+                onHistorySearchQueryChange?.invoke("")
+            },
+            searchQuery = historySearchQuery,
+            searchResults = historySearchResults,
+            onSearchQueryChange = { query ->
+                onHistorySearchQueryChange?.invoke(query)
+            },
+            onSelectSearchMatch = { match ->
+                ttsController.stop()
+                searchScrollTarget = match
+                onSelectConversation(match.conversationId)
+            }
         )
     }
 
@@ -824,9 +1025,19 @@ internal fun ChatScreenContent(
                                                 putExtra(Intent.EXTRA_SUBJECT, "محادثة مع سنا")
                                                 putExtra(Intent.EXTRA_TEXT, exported)
                                             }
-                                            context.startActivity(
-                                                Intent.createChooser(shareIntent, "مشاركة أو تصدير المحادثة")
-                                            )
+                                            val chooser = Intent.createChooser(
+                                                shareIntent,
+                                                "مشاركة أو تصدير المحادثة"
+                                            ).apply {
+                                                if (context !is Activity) {
+                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                            }
+                                            try {
+                                                context.startActivity(chooser)
+                                            } catch (_: ActivityNotFoundException) {
+                                                // Ignore when no share handler is available
+                                            }
                                         }
                                     },
                                     modifier = Modifier.testTag("export_chat_menu_item")
@@ -965,7 +1176,7 @@ internal fun ChatScreenContent(
                                 onToggleExpanded = { promptCarouselExpanded = !promptCarouselExpanded },
                                 onSelectPrompt = { promptText ->
                                     if (!isSending) {
-                                        speechController.stopListening()
+                                        activeSpeechController.stopListening()
                                         ttsController.stop()
                                         dictationBaseText = ""
                                         onSendMessage(promptText)
@@ -977,6 +1188,30 @@ internal fun ChatScreenContent(
                                 preferredName = preferredName,
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                             )
+                            if (savedConversations.isNotEmpty() && onSelectConversation != null) {
+                                OutlinedButton(
+                                    onClick = { showHistorySheet = true },
+                                    border = BorderStroke(1.dp, sanaColors.tealAccent),
+                                    modifier = Modifier
+                                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("empty_state_history_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.History,
+                                        contentDescription = null,
+                                        tint = sanaColors.tealDeep,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    androidx.compose.foundation.layout.Spacer(
+                                        modifier = Modifier.size(8.dp)
+                                    )
+                                    Text(
+                                        text = "العودة إلى المحادثات المحفوظة (${savedConversations.size})",
+                                        color = sanaColors.tealDeep
+                                    )
+                                }
+                            }
                         }
                     } else {
                         LazyColumn(
@@ -994,7 +1229,7 @@ internal fun ChatScreenContent(
                                     onToggleExpanded = { promptCarouselExpanded = !promptCarouselExpanded },
                                     onSelectPrompt = { promptText ->
                                         if (!isSending) {
-                                            speechController.stopListening()
+                                            activeSpeechController.stopListening()
                                             ttsController.stop()
                                             dictationBaseText = ""
                                             onSendMessage(promptText)
@@ -1007,6 +1242,7 @@ internal fun ChatScreenContent(
                                 ChatBubbleItem(
                                     message = msg,
                                     isSpeaking = !msg.isUser && ttsController.speakingMessageId == msg.id,
+                                    isHighlighted = highlightedMessageKey == msg.id,
                                     onToggleSpeak = if (!msg.isUser) {
                                         { ttsController.toggleSpeak(msg.id, msg.text) }
                                     } else {
@@ -1018,7 +1254,9 @@ internal fun ChatScreenContent(
                                 item(key = "streaming_bubble") {
                                     StreamingBubbleItem(
                                         text = streamingReply.orEmpty(),
-                                        sourceTitle = streamingSource
+                                        sourceTitle = streamingSource,
+                                        isSending = isSending,
+                                        onStopGeneration = onStopGeneration
                                     )
                                 }
                             }
@@ -1066,22 +1304,22 @@ internal fun ChatScreenContent(
 
         // Speech-to-Text Listening / Error Banner
         AnimatedVisibility(
-            visible = speechController.isListening || !speechController.errorMessage.isNullOrBlank()
+            visible = activeSpeechController.isListening || !activeSpeechController.errorMessage.isNullOrBlank()
         ) {
-            val speechErr = speechController.errorMessage
+            val speechErr = activeSpeechController.errorMessage
             Surface(
-                color = if (speechController.isListening) sanaColors.tealTint else sanaColors.errorSurface,
+                color = if (activeSpeechController.isListening) sanaColors.tealTint else sanaColors.errorSurface,
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(
-                        if (!speechController.isListening && !speechErr.isNullOrBlank()) {
-                            Modifier.clickable { speechController.dismissError() }
+                        if (!activeSpeechController.isListening && !speechErr.isNullOrBlank()) {
+                            Modifier.clickable { activeSpeechController.dismissError() }
                         } else {
                             Modifier
                         }
                     )
                     .testTag(
-                        if (speechController.isListening) "speech_listening_banner" else "speech_error_banner"
+                        if (activeSpeechController.isListening) "speech_listening_banner" else "speech_error_banner"
                     )
             ) {
                 Row(
@@ -1091,12 +1329,18 @@ internal fun ChatScreenContent(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (speechController.isListening) {
+                    if (activeSpeechController.isListening) {
+                        val pulseScale = 1f + (activeSpeechController.audioLevel * 0.25f)
                         Icon(
                             imageVector = Icons.Filled.GraphicEq,
                             contentDescription = null,
                             tint = sanaColors.tealDeep,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier
+                                .size(18.dp)
+                                .graphicsLayer {
+                                    scaleX = pulseScale
+                                    scaleY = pulseScale
+                                }
                         )
                         Text(
                             text = stringResource(R.string.speech_listening),
@@ -1105,8 +1349,10 @@ internal fun ChatScreenContent(
                             modifier = Modifier.weight(1f)
                         )
                         TextButton(
-                            onClick = { speechController.stopListening() },
-                            modifier = Modifier.testTag("speech_stop_button")
+                            onClick = { activeSpeechController.stopListening() },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("speech_stop_button")
                         ) {
                             Text(
                                 text = stringResource(R.string.speech_stop),
@@ -1125,7 +1371,7 @@ internal fun ChatScreenContent(
             }
         }
 
-        // Text Input Field (with Microphone Button) + Send Button
+        // Chat Input Bar (Text Field + Microphone Button + Send Button)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1143,49 +1389,16 @@ internal fun ChatScreenContent(
                         style = MaterialTheme.typography.bodyMedium
                     )
                 },
-                trailingIcon = {
-                    IconButton(
-                        onClick = {
-                            if (!speechController.isListening) {
-                                ttsController.stop()
-                                dictationBaseText = inputText
-                            }
-                            speechController.toggleListening()
-                        },
-                        enabled = !isSending,
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("chat_mic_button")
-                    ) {
-                        Icon(
-                            imageVector = if (speechController.isListening) {
-                                Icons.Filled.Stop
-                            } else {
-                                Icons.Filled.Mic
-                            },
-                            contentDescription = if (speechController.isListening) {
-                                stringResource(R.string.mic_stop_cd)
-                            } else {
-                                stringResource(R.string.mic_start_cd)
-                            },
-                            tint = if (speechController.isListening) {
-                                sanaColors.errorText
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            }
-                        )
-                    }
-                },
                 singleLine = false,
                 maxLines = 4,
                 shape = RoundedCornerShape(16.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = if (speechController.isListening) {
+                    focusedBorderColor = if (activeSpeechController.isListening) {
                         sanaColors.tealAccent
                     } else {
                         MaterialTheme.colorScheme.primary
                     },
-                    unfocusedBorderColor = if (speechController.isListening) {
+                    unfocusedBorderColor = if (activeSpeechController.isListening) {
                         sanaColors.tealAccent
                     } else {
                         sanaColors.cardBorder
@@ -1197,7 +1410,7 @@ internal fun ChatScreenContent(
                 keyboardActions = KeyboardActions(
                     onSend = {
                         if (inputText.isNotBlank() && !isSending) {
-                            speechController.stopListening()
+                            activeSpeechController.stopListening()
                             dictationBaseText = ""
                             onSendMessage(inputText)
                             inputText = ""
@@ -1209,10 +1422,61 @@ internal fun ChatScreenContent(
                     .testTag("chat_input_field")
             )
 
+            val micScale = if (activeSpeechController.isListening) {
+                1.04f + (activeSpeechController.audioLevel * 0.12f)
+            } else {
+                1f
+            }
+            IconButton(
+                onClick = {
+                    if (!activeSpeechController.isListening) {
+                        ttsController.stop()
+                        dictationBaseText = inputText
+                    }
+                    activeSpeechController.toggleListening()
+                },
+                enabled = !isSending,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = if (activeSpeechController.isListening) {
+                        sanaColors.errorSurface
+                    } else {
+                        sanaColors.tealTint
+                    },
+                    contentColor = if (activeSpeechController.isListening) {
+                        sanaColors.errorText
+                    } else {
+                        sanaColors.tealDeep
+                    },
+                    disabledContainerColor = sanaColors.cardBorder.copy(alpha = 0.4f),
+                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                ),
+                modifier = Modifier
+                    .size(48.dp)
+                    .minimumInteractiveComponentSize()
+                    .graphicsLayer {
+                        scaleX = micScale
+                        scaleY = micScale
+                    }
+                    .testTag("chat_mic_button")
+            ) {
+                Icon(
+                    imageVector = if (activeSpeechController.isListening) {
+                        Icons.Filled.Stop
+                    } else {
+                        Icons.Filled.Mic
+                    },
+                    contentDescription = if (activeSpeechController.isListening) {
+                        stringResource(R.string.mic_stop_cd)
+                    } else {
+                        stringResource(R.string.mic_start_cd)
+                    }
+                )
+            }
+
             IconButton(
                 onClick = {
                     if (inputText.isNotBlank() && !isSending) {
-                        speechController.stopListening()
+                        activeSpeechController.stopListening()
                         dictationBaseText = ""
                         onSendMessage(inputText)
                         inputText = ""
@@ -1303,6 +1567,7 @@ private fun ChatWelcomeEmptyState(
 private fun ChatBubbleItem(
     message: ChatDisplayMessage,
     isSpeaking: Boolean = false,
+    isHighlighted: Boolean = false,
     onToggleSpeak: (() -> Unit)? = null
 ) {
     val sanaColors = LocalSanaColors.current
@@ -1361,6 +1626,7 @@ private fun ChatBubbleItem(
                 shape = bubbleShape,
                 color = if (message.isUser) sanaColors.userBubble else MaterialTheme.colorScheme.surface,
                 border = when {
+                    isHighlighted -> BorderStroke(2.dp, sanaColors.tealAccent)
                     message.isUser -> null
                     isSpeaking -> BorderStroke(1.5.dp, sanaColors.tealAccent)
                     else -> BorderStroke(1.dp, sanaColors.cardBorder)
@@ -1623,9 +1889,22 @@ internal fun formatShareSnippet(message: ChatDisplayMessage): String {
 @Composable
 private fun StreamingBubbleItem(
     text: String,
-    sourceTitle: String?
+    sourceTitle: String?,
+    isSending: Boolean = true,
+    onStopGeneration: (() -> Unit)? = null
 ) {
     val sanaColors = LocalSanaColors.current
+    val pulseTransition = rememberInfiniteTransition(label = "streaming_bubble_pulse")
+    val borderAlpha by pulseTransition.animateFloat(
+        initialValue = 0.40f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "streaming_border_pulse"
+    )
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Start
@@ -1633,7 +1912,7 @@ private fun StreamingBubbleItem(
         Surface(
             shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 6.dp),
             color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, sanaColors.tealAccent),
+            border = BorderStroke(1.5.dp, sanaColors.tealAccent.copy(alpha = borderAlpha)),
             modifier = Modifier
                 .widthIn(max = 320.dp)
                 .testTag("chat_streaming_bubble")
@@ -1647,15 +1926,45 @@ private fun StreamingBubbleItem(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "سنا · Gemini",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                        color = sanaColors.tealDeep
-                    )
-                    TypingDotsIndicator(
-                        dotColor = sanaColors.tealAccent,
-                        modifier = Modifier.testTag("chat_typing_dots")
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        com.example.ui.components.AiPulseOrb(
+                            size = 20.dp,
+                            modifier = Modifier.testTag("chat_loading_pulse")
+                        )
+                        Text(
+                            text = "سنا · Gemini",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = sanaColors.tealDeep
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        TypingDotsIndicator(
+                            dotColor = sanaColors.tealAccent,
+                            modifier = Modifier.testTag("chat_typing_dots")
+                        )
+                        if (isSending && onStopGeneration != null) {
+                            IconButton(
+                                onClick = onStopGeneration,
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .size(36.dp)
+                                    .testTag("stop_generation_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.StopCircle,
+                                    contentDescription = "إيقاف التوليد",
+                                    tint = sanaColors.errorText,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
                 }
 
                 if (text.isBlank()) {

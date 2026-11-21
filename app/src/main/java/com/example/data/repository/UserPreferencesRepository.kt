@@ -3,6 +3,7 @@ package com.example.data.repository
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -21,6 +22,24 @@ class UserPreferencesRepository(
     private val dataStore: DataStore<Preferences>
 ) {
     constructor(context: Context) : this(context.applicationContext.sanaUserPreferencesDataStore)
+
+    val hasCompletedOnboarding: Flow<Boolean> = dataStore.data
+        .catch { exception ->
+            if (exception is IOException) {
+                emit(emptyPreferences())
+            } else {
+                throw exception
+            }
+        }
+        .map { prefs ->
+            prefs[ONBOARDING_COMPLETED_KEY] ?: false
+        }
+
+    suspend fun setOnboardingCompleted(completed: Boolean = true) {
+        dataStore.edit { prefs ->
+            prefs[ONBOARDING_COMPLETED_KEY] = completed
+        }
+    }
 
     val preferredName: Flow<String?> = dataStore.data
         .catch { exception ->
@@ -79,6 +98,7 @@ class UserPreferencesRepository(
         stringPreferencesKey("active_conversation_id_${userId.ifBlank { "local" }}")
 
     companion object {
+        val ONBOARDING_COMPLETED_KEY = booleanPreferencesKey("onboarding_completed")
         val PREFERRED_NAME_KEY = stringPreferencesKey("preferred_name")
         const val MAX_PREFERRED_NAME_LENGTH = 40
     }

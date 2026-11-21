@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import com.example.data.local.ChatConversationDao
 import com.example.data.local.ChatConversationEntity
+import com.example.data.local.ChatHistorySearchMatch
 import com.example.data.local.ChatMessageDao
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.DEFAULT_CONVERSATION_ID
@@ -9,6 +10,7 @@ import com.example.data.model.ChatMessage
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 
 class LocalChatRepository(
     private val chatMessageDao: ChatMessageDao,
@@ -23,6 +25,36 @@ class LocalChatRepository(
 
     fun observeConversations(userId: String): Flow<List<ChatConversationEntity>> =
         conversationDao?.observeConversations(userId) ?: flowOf(emptyList())
+
+    fun searchHistory(userId: String, rawQuery: String): Flow<List<ChatHistorySearchMatch>> {
+        val trimmed = rawQuery.trim()
+        if (trimmed.isEmpty()) return flowOf(emptyList())
+
+        val escapedPattern = "%${escapeLikeQuery(trimmed.lowercase())}%"
+        return chatMessageDao.searchHistory(userId, escapedPattern).map { matches ->
+            val conversationsWithBodyHits = matches
+                .filter { it.matchedInMessageBody }
+                .map { it.conversationId }
+                .toSet()
+            val seenTitleOnlyConversations = mutableSetOf<String>()
+
+            matches.filter { match ->
+                if (match.matchedInMessageBody) {
+                    true
+                } else if (match.conversationId in conversationsWithBodyHits) {
+                    false
+                } else {
+                    seenTitleOnlyConversations.add(match.conversationId)
+                }
+            }
+        }
+    }
+
+    private fun escapeLikeQuery(input: String): String =
+        input
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
 
     fun createNewConversationId(): String = "conv_${UUID.randomUUID()}"
 

@@ -95,6 +95,7 @@ fun rememberTextToSpeechController(): TextToSpeechController {
     var initFailed by remember { mutableStateOf(false) }
     var pendingUtterance by remember { mutableStateOf<Pair<String, String>?>(null) }
     var ttsInstance by remember { mutableStateOf<TextToSpeech?>(null) }
+    var isDisposed by remember { mutableStateOf(false) }
 
     fun speakInternal(tts: TextToSpeech, messageId: String, rawText: String) {
         val clean = stripMarkdownForSpeech(rawText)
@@ -132,7 +133,9 @@ fun rememberTextToSpeechController(): TextToSpeechController {
         chunks.forEachIndexed { index, chunk ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             val utteranceId = if (index == chunks.lastIndex) messageId else "${messageId}_part_$index"
-            val result = tts.speak(chunk, queueMode, null, utteranceId)
+            val result = runCatching {
+                tts.speak(chunk, queueMode, null, utteranceId)
+            }.getOrElse { TextToSpeech.ERROR }
             if (result == TextToSpeech.ERROR) {
                 speakingMessageId = null
                 errorMessage = appContext.getString(R.string.tts_error_speaking)
@@ -142,9 +145,11 @@ fun rememberTextToSpeechController(): TextToSpeechController {
     }
 
     DisposableEffect(appContext) {
+        isDisposed = false
         lateinit var engine: TextToSpeech
         engine = TextToSpeech(appContext) { status ->
             mainHandler.post {
+                if (isDisposed) return@post
                 if (status == TextToSpeech.SUCCESS) {
                     isInitialized = true
                     initFailed = false
@@ -209,6 +214,8 @@ fun rememberTextToSpeechController(): TextToSpeechController {
         ttsInstance = engine
 
         onDispose {
+            isDisposed = true
+            mainHandler.removeCallbacksAndMessages(null)
             pendingUtterance = null
             speakingMessageId = null
             runCatching {

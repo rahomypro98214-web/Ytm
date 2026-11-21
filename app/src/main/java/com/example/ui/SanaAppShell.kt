@@ -85,7 +85,8 @@ import com.example.ui.theme.LocalSanaColors
 fun SanaAppShell(
     viewModel: SanaViewModel,
     userDisplayName: String?,
-    onSignedOut: () -> Unit
+    onSignedOut: () -> Unit,
+    onReplayOnboarding: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -250,14 +251,15 @@ fun SanaAppShell(
                                             .clip(CircleShape)
                                             .background(sanaColors.mintGlow)
                                     )
+                                    val safePreferredName = preferredName?.takeIf { it.isNotBlank() }
                                     Text(
-                                        text = if (!preferredName.isNullOrBlank()) {
-                                            stringResource(R.string.top_greeting_format, preferredName!!)
+                                        text = if (safePreferredName != null) {
+                                            stringResource(R.string.top_greeting_format, safePreferredName)
                                         } else {
                                             "متصل بـ Gemini · ذاكرة سحابية"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (!preferredName.isNullOrBlank()) {
+                                        color = if (safePreferredName != null) {
                                             sanaColors.mintGlow
                                         } else {
                                             sanaColors.heroSubtext
@@ -313,14 +315,16 @@ fun SanaAppShell(
                                 expanded = showMenu,
                                 onDismissRequest = { showMenu = false }
                             ) {
-                                if (!effectiveDisplayName.isNullOrBlank()) {
+                                val menuGreetingName = preferredName?.takeIf { it.isNotBlank() }
+                                val menuDisplayName = effectiveDisplayName?.takeIf { it.isNotBlank() }
+                                if (menuDisplayName != null) {
                                     DropdownMenuItem(
                                         text = {
                                             Text(
-                                                text = if (!preferredName.isNullOrBlank()) {
-                                                    stringResource(R.string.top_greeting_format, preferredName!!)
+                                                text = if (menuGreetingName != null) {
+                                                    stringResource(R.string.top_greeting_format, menuGreetingName)
                                                 } else {
-                                                    effectiveDisplayName
+                                                    menuDisplayName
                                                 },
                                                 style = MaterialTheme.typography.titleSmall
                                             )
@@ -345,6 +349,22 @@ fun SanaAppShell(
                                     },
                                     modifier = Modifier.testTag("settings_menu_item")
                                 )
+                                if (onReplayOnboarding != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.onboarding_replay_tour)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.Info,
+                                                contentDescription = null
+                                            )
+                                        },
+                                        onClick = {
+                                            showMenu = false
+                                            onReplayOnboarding()
+                                        },
+                                        modifier = Modifier.testTag("replay_onboarding_menu_item")
+                                    )
+                                }
                                 if (selectedTab == SanaTab.CHAT) {
                                     DropdownMenuItem(
                                         text = {

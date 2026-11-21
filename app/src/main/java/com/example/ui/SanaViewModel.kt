@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.ChatConversationEntity
+import com.example.data.local.ChatHistorySearchMatch
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.model.ChatMessage
@@ -21,11 +22,14 @@ import com.example.data.repository.SanaFirestoreRepository
 import com.example.data.repository.StudioAspectRatio
 import com.example.data.repository.UserPreferencesRepository
 import com.example.data.repository.VideoStoryboardPlan
+import com.example.data.repository.formatAiErrorMessage
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
 import java.util.Date
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -112,6 +116,21 @@ class SanaViewModel(
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
 
+    private val _historySearchQuery = MutableStateFlow("")
+    val historySearchQuery: StateFlow<String> = _historySearchQuery.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val historySearchResults: StateFlow<List<ChatHistorySearchMatch>> =
+        _historySearchQuery.flatMapLatest { query ->
+            localChatRepo.searchHistory(currentUserId, query)
+        }
+            .catch { error ->
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Error searching saved chat history", error)
+                emit(emptyList())
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val chatMessagesState: StateFlow<UiState<List<ChatMessage>>> =
         _activeConversationId.flatMapLatest { convId ->
@@ -190,8 +209,21 @@ class SanaViewModel(
     private val _streamingSource = MutableStateFlow<String?>(null)
     val streamingSource: StateFlow<String?> = _streamingSource.asStateFlow()
 
+    private val _streamingConversationId = MutableStateFlow<String?>(null)
+    private var activeChatJob: Job? = null
+
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    val isSendingActiveConversation: StateFlow<Boolean> =
+        combine(_isSending, _streamingConversationId, _activeConversationId) { sending, streamConv, activeConv ->
+            sending && (streamConv == null || streamConv == activeConv)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), false)
+
+    val activeStreamingReply: StateFlow<String?> =
+        combine(_streamingReply, _streamingConversationId, _activeConversationId) { reply, streamConv, activeConv ->
+            if (streamConv == null || streamConv == activeConv) reply else null
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), null)
 
     private val _chatError = MutableStateFlow<String?>(null)
     val chatError: StateFlow<String?> = _chatError.asStateFlow()
@@ -202,11 +234,17 @@ class SanaViewModel(
     private val _isGeneratingCourse = MutableStateFlow(false)
     val isGeneratingCourse: StateFlow<Boolean> = _isGeneratingCourse.asStateFlow()
 
+    private val _courseStreamingPreview = MutableStateFlow<String?>(null)
+    val courseStreamingPreview: StateFlow<String?> = _courseStreamingPreview.asStateFlow()
+
     private val _courseError = MutableStateFlow<String?>(null)
     val courseError: StateFlow<String?> = _courseError.asStateFlow()
 
     private val _selfLearnProgress = MutableStateFlow<SelfLearnProgress?>(null)
     val selfLearnProgress: StateFlow<SelfLearnProgress?> = _selfLearnProgress.asStateFlow()
+
+    private val _selfLearnStreamingPreview = MutableStateFlow<String?>(null)
+    val selfLearnStreamingPreview: StateFlow<String?> = _selfLearnStreamingPreview.asStateFlow()
 
     private val _selfLearnError = MutableStateFlow<String?>(null)
     val selfLearnError: StateFlow<String?> = _selfLearnError.asStateFlow()
@@ -219,6 +257,9 @@ class SanaViewModel(
 
     private val _studioStoryboardState = MutableStateFlow<UiState<VideoStoryboardPlan?>?>(null)
     val studioStoryboardState: StateFlow<UiState<VideoStoryboardPlan?>?> = _studioStoryboardState.asStateFlow()
+
+    private val _storyboardStreamingPreview = MutableStateFlow<String?>(null)
+    val storyboardStreamingPreview: StateFlow<String?> = _storyboardStreamingPreview.asStateFlow()
 
     private val _studioSceneImages = MutableStateFlow<Map<Int, UiState<Bitmap>>>(emptyMap())
     val studioSceneImages: StateFlow<Map<Int, UiState<Bitmap>>> = _studioSceneImages.asStateFlow()
@@ -288,6 +329,14 @@ class SanaViewModel(
         }
     }
 
+    fun updateHistorySearchQuery(query: String) {
+        _historySearchQuery.value = query
+    }
+
+    fun clearHistorySearch() {
+        _historySearchQuery.value = ""
+    }
+
     fun deleteConversation(conversationId: String) {
         viewModelScope.launch {
             localChatRepo.deleteConversation(currentUserId, conversationId)
@@ -299,6 +348,15 @@ class SanaViewModel(
         }
     }
 
+    fun stopChatGeneration() {
+        activeChatJob?.cancel()
+        activeChatJob = null
+        _streamingReply.value = null
+        _streamingSource.value = null
+        _streamingConversationId.value = null
+        _isSending.value = false
+    }
+
     fun sendMessage(rawText: String) {
         val messageText = rawText.trim()
         if (messageText.isEmpty() || _isSending.value) return
@@ -308,9 +366,10 @@ class SanaViewModel(
         val currentMessages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
         val kb = (knowledgeSourcesState.value as? UiState.Success)?.data ?: emptyList()
 
-        viewModelScope.launch {
+        activeChatJob = viewModelScope.launch {
             _isSending.value = true
             _chatError.value = null
+            _streamingConversationId.value = conversationId
             _streamingReply.value = ""
             _streamingSource.value = null
 
@@ -329,6 +388,7 @@ class SanaViewModel(
                 _chatError.value = e.localizedMessage ?: "تعذر حفظ الرسالة محليًا."
                 _isSending.value = false
                 _streamingReply.value = null
+                _streamingConversationId.value = null
                 return@launch
             }
 
@@ -388,21 +448,43 @@ class SanaViewModel(
                         }
                     }
                 }
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "AI chat reply timed out", e)
+                _chatError.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
+                if (finalReply.isNotBlank()) {
+                    runCatching {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                            localChatRepo.insertMessage(
+                                userId = currentUserId,
+                                role = "model",
+                                text = finalReply,
+                                sourceTitle = finalSource,
+                                mode = mode.key,
+                                conversationId = conversationId
+                            )
+                        }
+                    }
+                }
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "AI chat reply failed", e)
-                _chatError.value = e.localizedMessage ?: "حدث خطأ أثناء الاتصال بـ Gemini."
+                _chatError.value = formatAiErrorMessage(e)
             } finally {
                 _streamingReply.value = null
                 _streamingSource.value = null
+                _streamingConversationId.value = null
                 _isSending.value = false
+                activeChatJob = null
             }
         }
     }
 
     fun clearChatHistory() {
         val conversationId = _activeConversationId.value
+        if (_streamingConversationId.value == conversationId) {
+            stopChatGeneration()
+        }
         val messages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
         _chatError.value = null
         viewModelScope.launch {
@@ -450,9 +532,12 @@ class SanaViewModel(
         viewModelScope.launch {
             _selfLearnError.value = null
             _selfLearnSuccessBanner.value = null
+            _selfLearnStreamingPreview.value = null
             try {
                 _selfLearnProgress.value = SelfLearnProgress(1, site.name, steps)
-                val analysis = aiRepo.analyzeKnowledgeContent(site.text, site.name)
+                val analysis = aiRepo.analyzeKnowledgeContent(site.text, site.name) { partial ->
+                    _selfLearnStreamingPreview.value = partial
+                }
                 _selfLearnProgress.value = SelfLearnProgress(3, site.name, steps)
                 val saveRes = firestoreRepo.addKnowledgeSource(
                     title = site.name,
@@ -468,13 +553,17 @@ class SanaViewModel(
                     throw saveRes.exceptionOrNull() ?: IllegalStateException("فشل الحفظ")
                 }
                 _selfLearnSuccessBanner.value = "تعلّمت سنا «${site.name}» وأضافتها إلى ذاكرتها."
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "learnPresetSite timed out", e)
+                _selfLearnError.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "learnPresetSite failed", e)
-                _selfLearnError.value = e.localizedMessage ?: "تعذر حفظ المصدر."
+                _selfLearnError.value = formatAiErrorMessage(e)
             } finally {
                 _selfLearnProgress.value = null
+                _selfLearnStreamingPreview.value = null
             }
         }
     }
@@ -495,9 +584,12 @@ class SanaViewModel(
         viewModelScope.launch {
             _selfLearnError.value = null
             _selfLearnSuccessBanner.value = null
+            _selfLearnStreamingPreview.value = null
             try {
                 _selfLearnProgress.value = SelfLearnProgress(1, "نص مضاف", steps)
-                val analysis = aiRepo.analyzeKnowledgeContent(text)
+                val analysis = aiRepo.analyzeKnowledgeContent(text) { partial ->
+                    _selfLearnStreamingPreview.value = partial
+                }
                 _selfLearnProgress.value = SelfLearnProgress(3, analysis.title, steps)
                 val saveRes = firestoreRepo.addKnowledgeSource(
                     title = analysis.title,
@@ -513,13 +605,17 @@ class SanaViewModel(
                     throw saveRes.exceptionOrNull() ?: IllegalStateException("فشل الحفظ")
                 }
                 _selfLearnSuccessBanner.value = "تعلّمت سنا «${analysis.title}» (${analysis.factCount} أفكار رئيسية)."
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "learnPastedText timed out", e)
+                _selfLearnError.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "learnPastedText failed", e)
-                _selfLearnError.value = e.localizedMessage ?: "تعذر تحليل أو حفظ النص."
+                _selfLearnError.value = formatAiErrorMessage(e)
             } finally {
                 _selfLearnProgress.value = null
+                _selfLearnStreamingPreview.value = null
             }
         }
     }
@@ -540,11 +636,14 @@ class SanaViewModel(
         viewModelScope.launch {
             _selfLearnError.value = null
             _selfLearnSuccessBanner.value = null
+            _selfLearnStreamingPreview.value = null
             try {
                 _selfLearnProgress.value = SelfLearnProgress(0, trimmed, steps)
                 val (pageTitle, extractedText) = aiRepo.fetchWebPageText(trimmed)
                 _selfLearnProgress.value = SelfLearnProgress(2, pageTitle, steps)
-                val analysis = aiRepo.analyzeKnowledgeContent(extractedText, pageTitle)
+                val analysis = aiRepo.analyzeKnowledgeContent(extractedText, pageTitle) { partial ->
+                    _selfLearnStreamingPreview.value = partial
+                }
                 _selfLearnProgress.value = SelfLearnProgress(3, analysis.title, steps)
                 val normalizedUrl = if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
                 val hostLabel = runCatching {
@@ -565,13 +664,17 @@ class SanaViewModel(
                     throw saveRes.exceptionOrNull() ?: IllegalStateException("فشل الحفظ")
                 }
                 _selfLearnSuccessBanner.value = "تعلّمت سنا من «$hostLabel» وأضافتها إلى الذاكرة."
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "learnFromUrl timed out", e)
+                _selfLearnError.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "learnFromUrl failed", e)
-                _selfLearnError.value = e.localizedMessage ?: "تعذر قراءة الرابط."
+                _selfLearnError.value = formatAiErrorMessage(e)
             } finally {
                 _selfLearnProgress.value = null
+                _selfLearnStreamingPreview.value = null
             }
         }
     }
@@ -682,19 +785,26 @@ class SanaViewModel(
         viewModelScope.launch {
             _isGeneratingCourse.value = true
             _courseError.value = null
+            _courseStreamingPreview.value = null
             try {
-                val generated = aiRepo.generateCourse(cleanTopic)
+                val generated = aiRepo.generateCourse(cleanTopic) { partial ->
+                    _courseStreamingPreview.value = partial
+                }
                 val saveRes = firestoreRepo.saveCustomCourse(generated)
                 if (saveRes.isFailure) {
                     throw saveRes.exceptionOrNull() ?: IllegalStateException("تعذر حفظ الدورة.")
                 }
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "generateCustomCourse timed out", e)
+                _courseError.value = formatAiErrorMessage(e)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "generateCustomCourse failed", e)
-                _courseError.value = e.localizedMessage ?: "تعذر إنشاء الدورة بالذكاء الاصطناعي."
+                _courseError.value = formatAiErrorMessage(e)
             } finally {
                 _isGeneratingCourse.value = false
+                _courseStreamingPreview.value = null
             }
         }
     }
@@ -732,13 +842,14 @@ class SanaViewModel(
                         bitmap = bitmap
                     )
                 )
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "generateStudioImage timed out", e)
+                _studioImageState.value = UiState.Error(formatAiErrorMessage(e))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "generateStudioImage failed", e)
-                _studioImageState.value = UiState.Error(
-                    e.localizedMessage ?: "تعذر توليد الصورة."
-                )
+                _studioImageState.value = UiState.Error(formatAiErrorMessage(e))
             }
         }
     }
@@ -755,20 +866,27 @@ class SanaViewModel(
         if (clean.isEmpty() || _studioStoryboardState.value is UiState.Loading) return
         viewModelScope.launch {
             _studioStoryboardState.value = UiState.Loading
+            _storyboardStreamingPreview.value = null
             _studioSceneImages.value = emptyMap()
             try {
                 val plan = aiRepo.generateVideoStoryboard(
                     topic = clean,
-                    aspectRatio = aspectRatio
+                    aspectRatio = aspectRatio,
+                    onStreamingProgress = { partial ->
+                        _storyboardStreamingPreview.value = partial
+                    }
                 )
                 _studioStoryboardState.value = UiState.Success(plan)
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "generateVideoStoryboard timed out", e)
+                _studioStoryboardState.value = UiState.Error(formatAiErrorMessage(e))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "generateVideoStoryboard failed", e)
-                _studioStoryboardState.value = UiState.Error(
-                    e.localizedMessage ?: "تعذر إنشاء مخطط الفيديو."
-                )
+                _studioStoryboardState.value = UiState.Error(formatAiErrorMessage(e))
+            } finally {
+                _storyboardStreamingPreview.value = null
             }
         }
     }
@@ -787,12 +905,17 @@ class SanaViewModel(
                     aspectRatio = aspectRatio
                 )
                 _studioSceneImages.value = _studioSceneImages.value + (sceneIndex to UiState.Success(bitmap))
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "generateSceneFrame timed out for scene $sceneIndex", e)
+                _studioSceneImages.value = _studioSceneImages.value + (
+                    sceneIndex to UiState.Error(formatAiErrorMessage(e))
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "generateSceneFrame failed for scene $sceneIndex", e)
                 _studioSceneImages.value = _studioSceneImages.value + (
-                    sceneIndex to UiState.Error(e.localizedMessage ?: "تعذر توليد لقطة المشهد.")
+                    sceneIndex to UiState.Error(formatAiErrorMessage(e))
                 )
             }
         }

@@ -115,10 +115,13 @@ fun PromptOfTheDayCarousel(
     onToggleExpanded: () -> Unit,
     onSelectPrompt: (String) -> Unit,
     modifier: Modifier = Modifier,
-    dayOfYear: Int = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
+    dayOfYear: Int? = null
 ) {
     val sanaColors = LocalSanaColors.current
-    val dailyPrompts = remember(dayOfYear) { buildDailyPromptsCarousel(dayOfYear) }
+    val effectiveDay = remember(dayOfYear) {
+        dayOfYear ?: Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
+    }
+    val dailyPrompts = remember(effectiveDay) { buildDailyPromptsCarousel(effectiveDay) }
     val listState = rememberLazyListState()
     val firstVisibleIndex by remember {
         derivedStateOf { listState.firstVisibleItemIndex }

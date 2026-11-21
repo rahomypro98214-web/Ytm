@@ -83,4 +83,20 @@
     <string name="save_conversation_placeholder">مثال: ملخص درس الفيزياء، خطة السفر…</string>
     <string name="conversation_saved_badge">الحالية</string>
     <string name="delete_conversation_cd">حذف المحادثة</string>
+    <string name="onboarding_skip">تخطي</string>
+    <string name="onboarding_next">التالي</string>
+    <string name="onboarding_previous">السابق</string>
+    <string name="onboarding_get_started">ابدأ مع سنا</string>
+    <string name="onboarding_replay_tour">جولة تعريفية</string>
+    <string name="onboarding_hero_cd">رسم ترحيبي لتطبيق سنا</string>
+    <string name="onboarding_page_1_title">مرحبًا بك في سنا</string>
+    <string name="onboarding_page_1_body">رفيقك الذكي بالعربية: محادثات متدفقة فورية، دعم للإملاء والقراءة الصوتية، وحفظ تلقائي لسجل محادثاتك محليًا للعودة إليها في أي وقت.</string>
+    <string name="onboarding_page_2_title">تعلّم ذاتي وسجل محادثات دائم</string>
+    <string name="onboarding_page_2_body">أضف روابط الويب أو نصوصك لتتعلم سنا منها وتجيبك مع ذكر المصدر، واحفظ محادثاتك السابقة في قاعدة البيانات المحلية لتسترجعها بسهولة.</string>
+    <string name="onboarding_page_3_title">استوديو الإبداع والدورات الذكية</string>
+    <string name="onboarding_page_3_body">صمّم صورًا فنية وسيناريوهات فيديو قصصية بالذكاء الاصطناعي، واكتشف دروسًا واختبارات تفاعلية مخصصة لموضوعاتك.</string>
+    <string name="search_chat_history_placeholder">ابحث في المحادثات والرسائل…</string>
+    <string name="search_chat_history_clear_cd">مسح البحث</string>
+    <string name="search_chat_history_empty_format">لا توجد نتائج مطابقة لـ «%1$s» في سجل المحادثات.</string>
+    <string name="search_chat_history_results_format">نتائج البحث (%1$d)</string>
 </resources>

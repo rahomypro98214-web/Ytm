@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,10 +38,12 @@ import com.example.firebase.configureAppCheck
 import com.example.ui.SanaAppShell
 import com.example.ui.SanaViewModel
 import com.example.ui.screens.AuthScreen
+import com.example.ui.screens.OnboardingScreen
 import com.example.ui.theme.SanaTheme
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,8 +66,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SanaAppRoot() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val auth = remember { Firebase.auth }
     val credentialManager = remember(context) { CredentialManager.create(context) }
+    val userPrefsRepo = remember(context) { UserPreferencesRepository(context) }
+
+    val hasCompletedOnboarding by userPrefsRepo.hasCompletedOnboarding
+        .collectAsStateWithLifecycle(initialValue = null)
+    var showOnboardingReplay by remember { mutableStateOf(false) }
 
     val currentUser by auth.authStateFlow()
         .collectAsStateWithLifecycle(initialValue = auth.currentUser)
@@ -84,10 +93,20 @@ fun SanaAppRoot() {
     }
 
     val user = currentUser
-    if (!autoSignInChecked && user == null) {
+    val onboardingDone = hasCompletedOnboarding
+    if (onboardingDone == null || (!autoSignInChecked && user == null)) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
+    } else if (!onboardingDone || showOnboardingReplay) {
+        OnboardingScreen(
+            onFinish = {
+                showOnboardingReplay = false
+                scope.launch {
+                    userPrefsRepo.setOnboardingCompleted(true)
+                }
+            }
+        )
     } else if (user == null) {
         AuthScreen(onAuthSuccess = { })
     } else {
@@ -105,7 +124,6 @@ fun SanaAppRoot() {
                             chatMessageDao = sanaDb.chatMessageDao(),
                             conversationDao = sanaDb.chatConversationDao()
                         )
-                        val userPrefsRepo = UserPreferencesRepository(app)
                         SanaViewModel(
                             firestoreRepo = SanaFirestoreRepository(db = db, auth = auth),
                             aiRepo = SanaAiRepository(),
@@ -119,7 +137,8 @@ fun SanaAppRoot() {
             SanaAppShell(
                 viewModel = viewModel,
                 userDisplayName = user.displayName ?: user.email,
-                onSignedOut = { }
+                onSignedOut = { },
+                onReplayOnboarding = { showOnboardingReplay = true }
             )
         }
     }

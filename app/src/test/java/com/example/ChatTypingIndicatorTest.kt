@@ -8,6 +8,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import com.example.data.model.ChatMode
 import com.example.data.model.UiState
 import com.example.ui.screens.ChatDisplayMessage
@@ -30,6 +31,7 @@ class ChatTypingIndicatorTest {
     fun temporaryTypingBubbleAppearsWhileGeneratingAndDisappearsWhenDone() {
         var isSending by mutableStateOf(true)
         var streamingReply by mutableStateOf<String?>(null)
+        var stopClicked = false
         var messages by mutableStateOf(
             listOf(ChatDisplayMessage(id = "1", isUser = true, text = "اشرح لي الذكاء الاصطناعي"))
         )
@@ -48,22 +50,30 @@ class ChatTypingIndicatorTest {
                     onRetryLast = {},
                     onDismissError = {},
                     onClearChat = {},
-                    exportTextProvider = { "" }
+                    exportTextProvider = { "" },
+                    onStopGeneration = { stopClicked = true }
                 )
             }
         }
 
-        // Before first token arrives, temporary typing bubble + animated dots + status text show
+        // Before first token arrives, temporary typing bubble + pulse orb + animated dots + status text show
         composeRule.onNodeWithTag("chat_streaming_bubble").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_loading_pulse").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_typing_dots").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_typing_status_text").assertIsDisplayed()
+        composeRule.onNodeWithTag("stop_generation_button").assertIsDisplayed()
 
-        // While streaming partial tokens, bubble + typing dots remain visible and status placeholder hides
+        // While streaming partial tokens, bubble + pulse + typing dots remain visible and status placeholder hides
         streamingReply = "الذكاء الاصطناعي هو..."
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("chat_streaming_bubble").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_loading_pulse").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_typing_dots").assertIsDisplayed()
         composeRule.onAllNodesWithTag("chat_typing_status_text").assertCountEquals(0)
+
+        composeRule.onNodeWithTag("stop_generation_button").performClick()
+        composeRule.waitForIdle()
+        org.junit.Assert.assertTrue(stopClicked)
 
         // Once response completes, temporary typing bubble disappears and final AI bubble shows
         isSending = false

@@ -78,6 +78,7 @@ fun LearnScreen(
     val session by viewModel.learnSession.collectAsStateWithLifecycle()
     val activeCourse by viewModel.activeCourse.collectAsStateWithLifecycle()
     val isGenerating by viewModel.isGeneratingCourse.collectAsStateWithLifecycle()
+    val courseStreamingPreview by viewModel.courseStreamingPreview.collectAsStateWithLifecycle()
     val courseError by viewModel.courseError.collectAsStateWithLifecycle()
 
     var showGeneratorDialog by rememberSaveable { mutableStateOf(false) }
@@ -159,6 +160,7 @@ fun LearnScreen(
                     courses = courses,
                     progressMap = progressMap,
                     isGenerating = isGenerating,
+                    streamingPreview = courseStreamingPreview,
                     onOpenCourse = { viewModel.openCourse(it) },
                     onOpenGenerator = { showGeneratorDialog = true },
                     onDeleteCustom = { viewModel.deleteCustomCourse(it) }
@@ -206,6 +208,7 @@ private fun CourseListView(
     courses: List<CourseUi>,
     progressMap: Map<String, CourseProgress>,
     isGenerating: Boolean,
+    streamingPreview: String?,
     onOpenCourse: (CourseUi) -> Unit,
     onOpenGenerator: () -> Unit,
     onDeleteCustom: (String) -> Unit
@@ -249,11 +252,7 @@ private fun CourseListView(
                         contentAlignment = Alignment.Center
                     ) {
                         if (isGenerating) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(22.dp),
-                                color = sanaColors.mintGlow,
-                                strokeWidth = 2.5.dp
-                            )
+                            com.example.ui.components.AiPulseOrb(size = 32.dp)
                         } else {
                             Icon(
                                 imageVector = Icons.Filled.AutoAwesome,
@@ -269,9 +268,17 @@ private fun CourseListView(
                             color = sanaColors.heroOnBackground
                         )
                         Text(
-                            text = "اكتب أي موضوع لتوليد 3 دروس واختبار فوري محفوظ في حسابك.",
+                            text = if (isGenerating && !streamingPreview.isNullOrBlank()) {
+                                streamingPreview
+                            } else {
+                                "اكتب أي موضوع لتوليد 3 دروس واختبار فوري محفوظ في حسابك."
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = sanaColors.heroSubtext
+                            color = if (isGenerating && !streamingPreview.isNullOrBlank()) {
+                                sanaColors.mintGlow
+                            } else {
+                                sanaColors.heroSubtext
+                            }
                         )
                     }
                 }

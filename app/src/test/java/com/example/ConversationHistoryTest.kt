@@ -260,4 +260,143 @@ class ConversationHistoryTest {
         }
         assertTrue(runBlocking { repo.observeConversations("local").first().isEmpty() })
     }
+
+    @Test
+    fun roomSearchFindsMatchingMessagesAcrossSavedConversationsAndEscapesWildcards() = runBlocking {
+        val conv1 = repo.createNewConversationId()
+        repo.insertMessage(
+            userId = "local",
+            role = "user",
+            text = "كيف أستخدم Flow مع Room في Kotlin؟",
+            createdAtMillis = 1000L,
+            conversationId = conv1
+        )
+        repo.insertMessage(
+            userId = "local",
+            role = "model",
+            text = "تُرجع استعلامات DAO نوع Flow للتحديث التلقائي.",
+            createdAtMillis = 2000L,
+            conversationId = conv1
+        )
+        repo.saveConversation("local", conv1, customTitle = "دليل قواعد البيانات")
+
+        val conv2 = repo.createNewConversationId()
+        repo.insertMessage(
+            userId = "local",
+            role = "user",
+            text = "نسبة التقدم 100% في مشروع الفيزياء",
+            createdAtMillis = 3000L,
+            conversationId = conv2
+        )
+        repo.saveConversation("local", conv2, customTitle = "ملاحظات الفيزياء")
+
+        // Blank query yields empty list
+        assertTrue(repo.searchHistory("local", "   ").first().isEmpty())
+
+        // Case-insensitive message body search finds Kotlin match in conv1 only
+        val kotlinHits = repo.searchHistory("local", "kotlin").first()
+        assertEquals(1, kotlinHits.size)
+        assertEquals(conv1, kotlinHits[0].conversationId)
+        assertEquals("دليل قواعد البيانات", kotlinHits[0].conversationTitle)
+
+        // Title search deduplicates to a single representative entry for conv1
+        val titleHits = repo.searchHistory("local", "قواعد البيانات").first()
+        assertEquals(1, titleHits.size)
+        assertEquals(conv1, titleHits[0].conversationId)
+
+        // SQL LIKE wildcards (% and _) are escaped literally
+        val literalPercentHits = repo.searchHistory("local", "100%").first()
+        assertEquals(1, literalPercentHits.size)
+        assertEquals(conv2, literalPercentHits[0].conversationId)
+
+        val lonePercentHits = repo.searchHistory("local", "%").first()
+        assertEquals(1, lonePercentHits.size)
+        assertEquals(conv2, lonePercentHits[0].conversationId)
+    }
+
+    @Test
+    fun uiSearchFiltersSavedHistoryAndNavigatesToMatchedConversation() {
+        val olderConvId = runBlocking {
+            val id = repo.createNewConversationId()
+            repo.insertMessage(
+                userId = "local",
+                role = "user",
+                text = "احكِ لي عن تاريخ علم الفلك العربي",
+                createdAtMillis = 1000L,
+                conversationId = id
+            )
+            repo.insertMessage(
+                userId = "local",
+                role = "model",
+                text = "أسهم البيروني وابن يونس في تطوير الأرصاد الفلكية.",
+                createdAtMillis = 2000L,
+                conversationId = id
+            )
+            repo.saveConversation("local", id, customTitle = "رحلة الفلك")
+            id
+        }
+
+        runBlocking {
+            repo.insertMessage(
+                userId = "local",
+                role = "user",
+                text = "أعطني وصفة قهوة مختصة",
+                createdAtMillis = 5000L,
+                conversationId = DEFAULT_CONVERSATION_ID
+            )
+        }
+
+        val viewModel = FirebaseChatViewModel(repo)
+        composeRule.setContent {
+            SanaTheme {
+                ChatScreen(chatViewModel = viewModel)
+            }
+        }
+
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            composeRule.onAllNodesWithText("أعطني وصفة قهوة مختصة").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Open History sheet and search for a word in the older conversation
+        composeRule.onNodeWithTag("chat_history_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("history_search_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("history_search_input").performTextReplacement("البيروني")
+
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            composeRule.onAllNodesWithTag("history_search_results_list").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("history_search_results_count").assertIsDisplayed()
+        composeRule.onNodeWithText("رحلة الفلك").assertIsDisplayed()
+
+        // Non-matching query displays empty search card
+        composeRule.onNodeWithTag("history_search_input").performTextReplacement("كلمة_غير_موجودة")
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            composeRule.onAllNodesWithTag("history_search_empty").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Clear search restores full list, then search again and select result
+        composeRule.onNodeWithTag("history_search_clear_button").performClick()
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            composeRule.onAllNodesWithTag("conversation_history_list").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        composeRule.onNodeWithTag("history_search_input").performTextReplacement("البيروني")
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            composeRule.onAllNodesWithTag("history_search_results_list").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("رحلة الفلك").performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5000) {
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            composeRule.onAllNodesWithText("احكِ لي عن تاريخ علم الفلك العربي").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("أسهم البيروني وابن يونس في تطوير الأرصاد الفلكية.").assertIsDisplayed()
+        assertEquals(olderConvId, viewModel.activeConversationId.value)
+    }
 }
+

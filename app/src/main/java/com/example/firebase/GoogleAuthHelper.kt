@@ -27,6 +27,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
+private const val WEB_CLIENT_ID =
+    "1025768180782-24ie3jkoh5n4lbv1pv6sjb4b0fbl6mf3.apps.googleusercontent.com"
+
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { auth ->
         trySend(auth.currentUser)
@@ -46,14 +49,9 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = resolveDefaultWebClientId(context)
-    if (clientId == null) {
-        onUnauthenticated()
-        return
-    }
     val googleIdOption = GetGoogleIdOption.Builder()
         .setFilterByAuthorizedAccounts(true)
-        .setServerClientId(clientId)
+        .setServerClientId(WEB_CLIENT_ID)
         .setAutoSelectEnabled(true)
         .build()
     val request = GetCredentialRequest.Builder()
@@ -87,17 +85,12 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = resolveDefaultWebClientId(context)
-    if (clientId == null) {
-        onAuthError("تعذر العثور على إعدادات تسجيل الدخول بحساب Google.")
-        return
-    }
     val activity = context as? Activity
     if (activity == null) {
         onAuthError("تعذر بدء تسجيل الدخول من هذا السياق.")
         return
     }
-    val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+    val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = WEB_CLIENT_ID).build()
     val request = GetCredentialRequest.Builder()
         .addCredentialOption(signInOption)
         .build()
@@ -116,6 +109,12 @@ fun onGoogleSignInClicked(
         } catch (e: GetCredentialCancellationException) {
             Log.w("Auth", "Google Sign-In flow cancelled or dismissed: ${e.message}", e)
             onAuthCancelled()
+        } catch (e: androidx.credentials.exceptions.NoCredentialException) {
+            Log.w("Auth", "No Google credentials available on device", e)
+            onAuthError("لا يوجد حساب Google مسجّل أو متاح على هذا الجهاز حاليًا.")
+        } catch (e: androidx.credentials.exceptions.GetCredentialUnsupportedException) {
+            Log.w("Auth", "Credential Manager unsupported on device", e)
+            onAuthError("خدمة تسجيل الدخول بحساب Google غير مدعومة على هذا الجهاز.")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -141,15 +140,5 @@ fun signOutUser(
                 onSignOutComplete()
             }
         }
-    }
-}
-
-private fun resolveDefaultWebClientId(context: Context): String? {
-    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-    if (resId == 0) return null
-    return try {
-        context.getString(resId).takeIf { it.isNotBlank() }
-    } catch (_: Exception) {
-        null
     }
 }

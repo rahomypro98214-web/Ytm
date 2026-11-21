@@ -57,7 +57,7 @@ abstract class SanaDatabase : RoomDatabase() {
                         '$DEFAULT_CONVERSATION_ID',
                         userId,
                         'محادثة سابقة',
-                        (SELECT m2.text FROM chat_messages m2 WHERE m2.userId = m1.userId ORDER BY m2.createdAtMillis DESC, m2.localId DESC LIMIT 1),
+                        COALESCE((SELECT m2.text FROM chat_messages m2 WHERE m2.userId = m1.userId ORDER BY m2.createdAtMillis DESC, m2.localId DESC LIMIT 1), ''),
                         COUNT(*),
                         1,
                         MIN(createdAtMillis),
@@ -77,6 +77,7 @@ abstract class SanaDatabase : RoomDatabase() {
                     "sana_local.db"
                 )
                     .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
             }

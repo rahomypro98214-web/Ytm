@@ -73,6 +73,7 @@ fun SelfLearnScreen(
 
     val sourcesState by viewModel.knowledgeSourcesState.collectAsStateWithLifecycle()
     val progressState by viewModel.selfLearnProgress.collectAsStateWithLifecycle()
+    val streamingPreview by viewModel.selfLearnStreamingPreview.collectAsStateWithLifecycle()
     val errorState by viewModel.selfLearnError.collectAsStateWithLifecycle()
     val bannerState by viewModel.selfLearnSuccessBanner.collectAsStateWithLifecycle()
 
@@ -163,9 +164,13 @@ fun SelfLearnScreen(
             }
 
             // 2. Live Pipeline Stepper
-            if (progressState != null) {
+            val activeProgress = progressState
+            if (activeProgress != null) {
                 item(key = "pipeline_progress") {
-                    LearningPipelineCard(progress = progressState!!)
+                    LearningPipelineCard(
+                        progress = activeProgress,
+                        streamingPreview = streamingPreview
+                    )
                 }
             }
 
@@ -454,7 +459,10 @@ private fun KbStatCard(
 }
 
 @Composable
-private fun LearningPipelineCard(progress: SelfLearnProgress) {
+private fun LearningPipelineCard(
+    progress: SelfLearnProgress,
+    streamingPreview: String? = null
+) {
     val sanaColors = LocalSanaColors.current
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -465,11 +473,27 @@ private fun LearningPipelineCard(progress: SelfLearnProgress) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = "جاري تعلّم: ${progress.sourceName}",
-                style = MaterialTheme.typography.titleSmall,
-                color = sanaColors.heroOnBackground
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                com.example.ui.components.AiPulseOrb(size = 26.dp)
+                Text(
+                    text = "جاري تعلّم: ${progress.sourceName}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = sanaColors.heroOnBackground,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (!streamingPreview.isNullOrBlank()) {
+                Text(
+                    text = streamingPreview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = sanaColors.mintGlow,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             progress.steps.forEachIndexed { idx, stepText ->
                 val isDone = idx < progress.activeStep
                 val isCurrent = idx == progress.activeStep
