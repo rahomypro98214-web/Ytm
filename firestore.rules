@@ -1,0 +1,140 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global hardened helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Validation helpers
+    function isValidKnowledgeSource(data, userId) {
+      return data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+             data.sourceLabel is string && data.sourceLabel.size() >= 1 && data.sourceLabel.size() <= 200 &&
+             (!('sourceUrl' in data) || data.sourceUrl == null || (data.sourceUrl is string && data.sourceUrl.size() <= 500)) &&
+             data.sourceType in ['site', 'text', 'url'] &&
+             data.summary is string && data.summary.size() <= 1500 &&
+             data.content is string && data.content.size() >= 10 && data.content.size() <= 15000 &&
+             data.keywords is list && data.keywords.size() <= 10 &&
+             (data.keywords.size() == 0 || data.keywords[0] is string) &&
+             data.factCount is int && data.factCount >= 1 && data.factCount <= 500 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.userId == userId &&
+             data.role in ['user', 'model'] &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 15000 &&
+             (!('sourceTitle' in data) || data.sourceTitle == null || (data.sourceTitle is string && data.sourceTitle.size() <= 200)) &&
+             (!('mode' in data) || data.mode == null || data.mode in ['chat', 'summarize', 'translate', 'kb']) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidCourseProgress(data, userId) {
+      return data.userId == userId &&
+             data.completedLessons is list && data.completedLessons.size() <= 20 &&
+             (data.completedLessons.size() == 0 || data.completedLessons[0] is int) &&
+             (!('quizBestScore' in data) || data.quizBestScore == null || (data.quizBestScore is int && data.quizBestScore >= 0 && data.quizBestScore <= 20)) &&
+             (!('quizTotal' in data) || data.quizTotal == null || (data.quizTotal is int && data.quizTotal >= 1 && data.quizTotal <= 20)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidCustomCourse(data, userId) {
+      return data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.description is string && data.description.size() >= 1 && data.description.size() <= 300 &&
+             data.iconEmoji is string && data.iconEmoji.size() >= 1 && data.iconEmoji.size() <= 16 &&
+             data.lessons is list && data.lessons.size() >= 1 && data.lessons.size() <= 10 &&
+             data.lessons[0] is map &&
+             data.quiz is list && data.quiz.size() >= 1 && data.quiz.size() <= 10 &&
+             data.quiz[0] is map &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+
+      match /knowledgeSources/{sourceId} {
+        allow get: if isOwner(userId) && isValidId(sourceId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(sourceId) &&
+                         incoming().keys().hasAll(['userId', 'title', 'sourceLabel', 'sourceType', 'summary', 'content', 'keywords', 'factCount', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'title', 'sourceLabel', 'sourceUrl', 'sourceType', 'summary', 'content', 'keywords', 'factCount', 'createdAt', 'updatedAt']) &&
+                         isValidKnowledgeSource(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(sourceId) &&
+                         isValidKnowledgeSource(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'summary', 'keywords', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(sourceId);
+      }
+
+      match /chatMessages/{messageId} {
+        allow get: if isOwner(userId) && isValidId(messageId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(messageId) &&
+                         incoming().keys().hasAll(['userId', 'role', 'text', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'role', 'text', 'sourceTitle', 'mode', 'createdAt']) &&
+                         isValidChatMessage(incoming(), userId);
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(messageId);
+      }
+
+      match /courseProgress/{courseId} {
+        allow get: if isOwner(userId) && isValidId(courseId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(courseId) &&
+                         incoming().keys().hasAll(['userId', 'completedLessons', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'completedLessons', 'quizBestScore', 'quizTotal', 'createdAt', 'updatedAt']) &&
+                         isValidCourseProgress(incoming(), userId);
+        allow update: if isOwner(userId) &&
+                         isValidId(courseId) &&
+                         isValidCourseProgress(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['completedLessons', 'quizBestScore', 'quizTotal', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(courseId);
+      }
+
+      match /customCourses/{courseId} {
+        allow get: if isOwner(userId) && isValidId(courseId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(courseId) &&
+                         incoming().keys().hasAll(['userId', 'title', 'description', 'iconEmoji', 'lessons', 'quiz', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'title', 'description', 'iconEmoji', 'lessons', 'quiz', 'createdAt']) &&
+                         isValidCustomCourse(incoming(), userId);
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(courseId);
+      }
+    }
+  }
+}

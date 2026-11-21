@@ -1,0 +1,6 @@
+{
+  "name": "سنا",
+  "description": "مساعد ذكي بالعربية: محادثة مدعومة بالذكاء الاصطناعي، تعلم ذاتي من المصادر والنصوص، ودروس واختبارات تفاعلية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,1531 @@
+package com.example.ui.screens
+
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.SuggestionChipDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.R
+import com.example.data.local.SanaDatabase
+import com.example.data.model.ChatMessage
+import com.example.data.model.ChatMode
+import com.example.data.model.UiState
+import com.example.data.repository.LocalChatRepository
+import com.example.data.repository.UserPreferencesRepository
+import com.example.ui.SanaViewModel
+import com.example.ui.components.PromptOfTheDayCarousel
+import com.example.ui.components.SanaMarkdownText
+import com.example.ui.components.SettingsMenuDialog
+import com.example.ui.components.TextToSpeechController
+import com.example.ui.components.mergeDictatedText
+import com.example.ui.components.rememberSpeechToTextController
+import com.example.ui.components.rememberTextToSpeechController
+import com.example.ui.theme.LocalSanaColors
+import com.google.firebase.Firebase
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.content
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+
+private const val CHAT_TAG = "FirebaseChatVM"
+private const val LOCAL_CHAT_USER_ID = "local"
+
+data class ChatDisplayMessage(
+    val id: String,
+    val isUser: Boolean,
+    val text: String,
+    val sourceTitle: String? = null
+)
+
+/**
+ * Standalone ViewModel powered by Firebase AI Logic (`Firebase.ai`) and Room (`LocalChatRepository`)
+ * for displaying, streaming, and persisting user and AI messages in [ChatScreen].
+ */
+class FirebaseChatViewModel(
+    private val localChatRepo: LocalChatRepository,
+    private val userPreferencesRepo: UserPreferencesRepository? = null
+) : ViewModel() {
+    val preferredName: StateFlow<String?> =
+        userPreferencesRepo?.preferredName
+            ?.stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000L),
+                initialValue = null
+            ) ?: MutableStateFlow<String?>(null).asStateFlow()
+
+    private val model by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            systemInstruction = content {
+                text("أنت سنا، مساعد ذكي بالعربية. قدّم إجابات واضحة وموجزة ومفيدة.")
+            }
+        )
+    }
+
+    val messages: StateFlow<List<ChatDisplayMessage>> =
+        localChatRepo.observeMessages(LOCAL_CHAT_USER_ID)
+            .map { entities ->
+                entities.map { entity ->
+                    ChatDisplayMessage(
+                        id = entity.remoteId?.takeIf { it.isNotBlank() } ?: "local_${entity.localId}",
+                        isUser = entity.role == "user",
+                        text = entity.text,
+                        sourceTitle = entity.sourceTitle
+                    )
+                }
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000L),
+                initialValue = emptyList()
+            )
+
+    private val _streamingText = MutableStateFlow<String?>(null)
+    val streamingText: StateFlow<String?> = _streamingText.asStateFlow()
+
+    private val _isSending = MutableStateFlow(false)
+    val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    fun dismissError() {
+        _error.value = null
+    }
+
+    fun clearMessages() {
+        _error.value = null
+        viewModelScope.launch {
+            localChatRepo.clearMessages(LOCAL_CHAT_USER_ID)
+        }
+    }
+
+    fun updatePreferredName(name: String) {
+        val repo = userPreferencesRepo ?: return
+        viewModelScope.launch {
+            repo.setPreferredName(name)
+        }
+    }
+
+    fun clearPreferredName() {
+        val repo = userPreferencesRepo ?: return
+        viewModelScope.launch {
+            repo.clearPreferredName()
+        }
+    }
+
+    fun sendMessage(rawText: String) {
+        val text = rawText.trim()
+        if (text.isEmpty() || _isSending.value) return
+
+        val historySnapshot = messages.value
+        _isSending.value = true
+        _error.value = null
+        _streamingText.value = ""
+
+        viewModelScope.launch {
+            localChatRepo.insertMessage(
+                userId = LOCAL_CHAT_USER_ID,
+                role = "user",
+                text = text
+            )
+
+            val accumulated = StringBuilder()
+            try {
+                val chatSession = model.startChat(
+                    history = historySnapshot.takeLast(10).map { msg ->
+                        content(role = if (msg.isUser) "user" else "model") { text(msg.text) }
+                    }
+                )
+                withTimeout(60_000L) {
+                    chatSession.sendMessageStream(text).collect { chunk ->
+                        val piece = chunk.text.orEmpty()
+                        if (piece.isNotEmpty()) {
+                            accumulated.append(piece)
+                            _streamingText.value = accumulated.toString()
+                        }
+                    }
+                }
+                if (accumulated.isNotBlank()) {
+                    localChatRepo.insertMessage(
+                        userId = LOCAL_CHAT_USER_ID,
+                        role = "model",
+                        text = accumulated.toString()
+                    )
+                } else {
+                    _error.value = "لم يُرجِع النموذج نصًا. حاول مرة أخرى."
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.e(CHAT_TAG, "Firebase AI chat timed out", e)
+                _error.value = "انتهت مهلة الاتصال بالذكاء الاصطناعي (60 ثانية)."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(CHAT_TAG, "Firebase AI chat failed", e)
+                _error.value = e.localizedMessage ?: "حدث خطأ أثناء الاتصال بـ Firebase AI."
+            } finally {
+                _streamingText.value = null
+                _isSending.value = false
+            }
+        }
+    }
+
+    companion object {
+        val Factory: ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                val app = checkNotNull(this[APPLICATION_KEY])
+                FirebaseChatViewModel(
+                    localChatRepo = LocalChatRepository(SanaDatabase.getInstance(app).chatMessageDao()),
+                    userPreferencesRepo = UserPreferencesRepository(app)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Self-contained ChatScreen component backed by [FirebaseChatViewModel], Room, and Firebase AI.
+ */
+@Composable
+fun ChatScreen(
+    modifier: Modifier = Modifier,
+    chatViewModel: FirebaseChatViewModel = viewModel(factory = FirebaseChatViewModel.Factory)
+) {
+    val messages by chatViewModel.messages.collectAsStateWithLifecycle()
+    val streamingText by chatViewModel.streamingText.collectAsStateWithLifecycle()
+    val isSending by chatViewModel.isSending.collectAsStateWithLifecycle()
+    val error by chatViewModel.error.collectAsStateWithLifecycle()
+    val preferredName by chatViewModel.preferredName.collectAsStateWithLifecycle()
+
+    ChatScreenContent(
+        messagesState = UiState.Success(messages),
+        streamingReply = streamingText,
+        streamingSource = null,
+        isSending = isSending,
+        chatError = error,
+        selectedMode = null,
+        onSelectMode = null,
+        onSendMessage = { chatViewModel.sendMessage(it) },
+        onRetryLast = {
+            messages.lastOrNull { it.isUser }?.let { chatViewModel.sendMessage(it.text) }
+        },
+        onDismissError = { chatViewModel.dismissError() },
+        onClearChat = { chatViewModel.clearMessages() },
+        exportTextProvider = {
+            messages.joinToString("\n\n") { m -> "${if (m.isUser) "أنت" else "سنا"}: ${m.text}" }
+        },
+        modifier = modifier,
+        preferredName = preferredName,
+        onUpdatePreferredName = { chatViewModel.updatePreferredName(it) },
+        onClearPreferredName = { chatViewModel.clearPreferredName() }
+    )
+}
+
+/**
+ * Integrated ChatScreen wired to [SanaViewModel] (Firebase AI + Knowledge Base RAG + Firestore sync).
+ */
+@Composable
+fun ChatScreen(
+    viewModel: SanaViewModel,
+    modifier: Modifier = Modifier
+) {
+    val messagesState by viewModel.chatMessagesState.collectAsStateWithLifecycle()
+    val chatMode by viewModel.chatMode.collectAsStateWithLifecycle()
+    val streamingReply by viewModel.streamingReply.collectAsStateWithLifecycle()
+    val streamingSource by viewModel.streamingSource.collectAsStateWithLifecycle()
+    val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+    val chatError by viewModel.chatError.collectAsStateWithLifecycle()
+    val preferredName by viewModel.preferredName.collectAsStateWithLifecycle()
+
+    val mappedState: UiState<List<ChatDisplayMessage>> = remember(messagesState) {
+        when (val state = messagesState) {
+            is UiState.Loading -> UiState.Loading
+            is UiState.Error -> UiState.Error(state.message)
+            is UiState.Success -> UiState.Success(
+                state.data.map { msg -> msg.toDisplayMessage() }
+            )
+        }
+    }
+
+    ChatScreenContent(
+        messagesState = mappedState,
+        streamingReply = streamingReply,
+        streamingSource = streamingSource,
+        isSending = isSending,
+        chatError = chatError,
+        selectedMode = chatMode,
+        onSelectMode = { viewModel.selectChatMode(it) },
+        onSendMessage = { viewModel.sendMessage(it) },
+        onRetryLast = {
+            val lastUser = (messagesState as? UiState.Success)?.data?.lastOrNull { it.role == "user" }
+            if (lastUser != null) viewModel.sendMessage(lastUser.text)
+        },
+        onDismissError = { viewModel.dismissChatError() },
+        onClearChat = { viewModel.clearChatHistory() },
+        exportTextProvider = { viewModel.buildExportChatText() },
+        modifier = modifier,
+        preferredName = preferredName,
+        onUpdatePreferredName = { viewModel.updatePreferredName(it) },
+        onClearPreferredName = { viewModel.clearPreferredName() }
+    )
+}
+
+private fun ChatMessage.toDisplayMessage() = ChatDisplayMessage(
+    id = id,
+    isUser = role == "user",
+    text = text,
+    sourceTitle = sourceTitle
+)
+
+@Composable
+internal fun ChatScreenContent(
+    messagesState: UiState<List<ChatDisplayMessage>>,
+    streamingReply: String?,
+    streamingSource: String?,
+    isSending: Boolean,
+    chatError: String?,
+    selectedMode: ChatMode?,
+    onSelectMode: ((ChatMode) -> Unit)?,
+    onSendMessage: (String) -> Unit,
+    onRetryLast: () -> Unit,
+    onDismissError: () -> Unit,
+    onClearChat: () -> Unit,
+    exportTextProvider: () -> String,
+    modifier: Modifier = Modifier,
+    ttsController: TextToSpeechController = rememberTextToSpeechController(),
+    preferredName: String? = null,
+    onUpdatePreferredName: ((String) -> Unit)? = null,
+    onClearPreferredName: (() -> Unit)? = null
+) {
+    val context = LocalContext.current
+    val sanaColors = LocalSanaColors.current
+
+    var inputText by rememberSaveable { mutableStateOf("") }
+    var dictationBaseText by remember { mutableStateOf("") }
+    var showClearDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var showChatOptionsMenu by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    val speechController = rememberSpeechToTextController(
+        onPartialResult = { partial ->
+            inputText = mergeDictatedText(dictationBaseText, partial)
+        },
+        onFinalResult = { final ->
+            val merged = mergeDictatedText(dictationBaseText, final)
+            inputText = merged
+            dictationBaseText = merged
+        }
+    )
+
+    val quickPrompts = remember {
+        listOf(
+            "ماذا تعلّمتِ حتى الآن؟",
+            "اكتبي لي قصيدة قصيرة ملهمة",
+            "اقترحي 3 أفكار مشاريع ذكية",
+            "لخّصي لي أهمية القراءة اليومية"
+        )
+    }
+
+    val messages = (messagesState as? UiState.Success)?.data ?: emptyList()
+    var promptCarouselExpanded by rememberSaveable(messages.isEmpty()) {
+        mutableStateOf(messages.isEmpty())
+    }
+    val showTypingBubble = isSending || streamingReply != null
+    val totalMessageItems = messages.size + (if (showTypingBubble) 1 else 0)
+    val isLastMessageSpeaking =
+        ttsController.speakingMessageId != null &&
+            ttsController.speakingMessageId == messages.lastOrNull()?.id
+
+    LaunchedEffect(messages.size, messages.lastOrNull()?.id, showTypingBubble, isLastMessageSpeaking) {
+        if (totalMessageItems > 0) {
+            listState.animateScrollToItem(totalMessageItems)
+        }
+    }
+
+    LaunchedEffect(streamingReply) {
+        if (!streamingReply.isNullOrEmpty() && totalMessageItems > 0) {
+            listState.scrollToItem(totalMessageItems)
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = {
+                Text(
+                    text = stringResource(R.string.clear_chat_confirm_title),
+                    style = MaterialTheme.typography.titleLarge
+                )
+            },
+            text = {
+                Text(
+                    text = stringResource(R.string.clear_chat_confirm_body),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearDialog = false
+                        ttsController.stop()
+                        onClearChat()
+                    },
+                    modifier = Modifier.testTag("confirm_clear_chat_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.clear_chat_confirm_action),
+                        color = sanaColors.errorText
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+        )
+    }
+
+    if (showSettingsDialog && onUpdatePreferredName != null) {
+        SettingsMenuDialog(
+            currentPreferredName = preferredName,
+            onSavePreferredName = onUpdatePreferredName,
+            onClearPreferredName = { onClearPreferredName?.invoke() ?: onUpdatePreferredName("") },
+            onDismiss = { showSettingsDialog = false }
+        )
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(sanaColors.chatCanvas)
+            .imePadding()
+    ) {
+        // Top Mode Selector + Overflow Menu (Settings / Export / Clear Chat History)
+        if (onSelectMode != null || onUpdatePreferredName != null || messages.isNotEmpty()) {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 1.dp
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (onSelectMode != null && selectedMode != null) {
+                                ChatMode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = selectedMode == mode,
+                                        onClick = { onSelectMode(mode) },
+                                        label = {
+                                            Text(
+                                                text = mode.label,
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MaterialTheme.colorScheme.secondary,
+                                            selectedLabelColor = MaterialTheme.colorScheme.onSecondary
+                                        ),
+                                        modifier = Modifier.testTag("chat_mode_${mode.key}")
+                                    )
+                                }
+                            } else if (!preferredName.isNullOrBlank()) {
+                                Text(
+                                    text = stringResource(R.string.top_greeting_format, preferredName.trim()),
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = sanaColors.tealDeep,
+                                    modifier = Modifier.testTag("chat_top_greeting")
+                                )
+                            }
+                        }
+
+                        Box {
+                            IconButton(
+                                onClick = { showChatOptionsMenu = true },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("chat_options_menu_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.MoreVert,
+                                    contentDescription = stringResource(R.string.chat_options),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            DropdownMenu(
+                                expanded = showChatOptionsMenu,
+                                onDismissRequest = { showChatOptionsMenu = false }
+                            ) {
+                                if (onUpdatePreferredName != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.settings_title)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.Settings,
+                                                contentDescription = null
+                                            )
+                                        },
+                                        onClick = {
+                                            showChatOptionsMenu = false
+                                            showSettingsDialog = true
+                                        },
+                                        modifier = Modifier.testTag("chat_settings_menu_item")
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.export_chat)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Filled.Share,
+                                            contentDescription = null
+                                        )
+                                    },
+                                    enabled = messages.isNotEmpty(),
+                                    onClick = {
+                                        showChatOptionsMenu = false
+                                        val exported = exportTextProvider()
+                                        if (exported.isNotBlank()) {
+                                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_SUBJECT, "محادثة مع سنا")
+                                                putExtra(Intent.EXTRA_TEXT, exported)
+                                            }
+                                            context.startActivity(
+                                                Intent.createChooser(shareIntent, "مشاركة أو تصدير المحادثة")
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("export_chat_menu_item")
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = stringResource(R.string.clear_chat_history),
+                                            color = if (messages.isNotEmpty()) {
+                                                sanaColors.errorText
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                            }
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Filled.DeleteSweep,
+                                            contentDescription = null,
+                                            tint = if (messages.isNotEmpty()) {
+                                                sanaColors.errorText
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                            }
+                                        )
+                                    },
+                                    enabled = messages.isNotEmpty(),
+                                    onClick = {
+                                        showChatOptionsMenu = false
+                                        showClearDialog = true
+                                    },
+                                    modifier = Modifier.testTag("clear_chat_menu_item")
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = sanaColors.cardBorder)
+                }
+            }
+        }
+
+        // Error Banner with Retry & Dismiss
+        AnimatedVisibility(visible = !chatError.isNullOrBlank()) {
+            Surface(
+                color = sanaColors.errorSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onDismissError() }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = chatError.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = sanaColors.errorText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (messages.any { it.isUser } && !isSending) {
+                        TextButton(
+                            onClick = onRetryLast,
+                            modifier = Modifier.testTag("retry_chat_button")
+                        ) {
+                            Text("إعادة المحاولة", color = sanaColors.errorText)
+                        }
+                    }
+                }
+            }
+        }
+
+        // TTS Error Banner (dismissible)
+        AnimatedVisibility(visible = !ttsController.errorMessage.isNullOrBlank()) {
+            Surface(
+                color = sanaColors.errorSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { ttsController.dismissError() }
+                    .testTag("tts_error_banner")
+            ) {
+                Text(
+                    text = ttsController.errorMessage.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = sanaColors.errorText,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+
+        // Scrollable Messages List
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            when (messagesState) {
+                is UiState.Loading -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                is UiState.Error -> {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = messagesState.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = sanaColors.errorText
+                        )
+                    }
+                }
+
+                is UiState.Success -> {
+                    if (messages.isEmpty() && !showTypingBubble) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            PromptOfTheDayCarousel(
+                                expanded = promptCarouselExpanded,
+                                enabled = !isSending,
+                                onToggleExpanded = { promptCarouselExpanded = !promptCarouselExpanded },
+                                onSelectPrompt = { promptText ->
+                                    if (!isSending) {
+                                        speechController.stopListening()
+                                        ttsController.stop()
+                                        dictationBaseText = ""
+                                        onSendMessage(promptText)
+                                    }
+                                }
+                            )
+                            HorizontalDivider(color = sanaColors.cardBorder)
+                            ChatWelcomeEmptyState(
+                                preferredName = preferredName,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("chat_message_list"),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            item(key = "prompt_of_day_header") {
+                                PromptOfTheDayCarousel(
+                                    expanded = promptCarouselExpanded,
+                                    enabled = !isSending,
+                                    onToggleExpanded = { promptCarouselExpanded = !promptCarouselExpanded },
+                                    onSelectPrompt = { promptText ->
+                                        if (!isSending) {
+                                            speechController.stopListening()
+                                            ttsController.stop()
+                                            dictationBaseText = ""
+                                            onSendMessage(promptText)
+                                        }
+                                    },
+                                    modifier = Modifier.clip(RoundedCornerShape(14.dp))
+                                )
+                            }
+                            items(messages, key = { it.id }) { msg ->
+                                ChatBubbleItem(
+                                    message = msg,
+                                    isSpeaking = !msg.isUser && ttsController.speakingMessageId == msg.id,
+                                    onToggleSpeak = if (!msg.isUser) {
+                                        { ttsController.toggleSpeak(msg.id, msg.text) }
+                                    } else {
+                                        null
+                                    }
+                                )
+                            }
+                            if (showTypingBubble) {
+                                item(key = "streaming_bubble") {
+                                    StreamingBubbleItem(
+                                        text = streamingReply.orEmpty(),
+                                        sourceTitle = streamingSource
+                                    )
+                                }
+                            }
+                            item(key = "chat_bottom_anchor") {
+                                Spacer(
+                                    modifier = Modifier
+                                        .height(1.dp)
+                                        .testTag("chat_bottom_anchor")
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick Prompt Chips
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            quickPrompts.forEach { prompt ->
+                SuggestionChip(
+                    onClick = { onSendMessage(prompt) },
+                    enabled = !isSending,
+                    label = {
+                        Text(
+                            text = prompt,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    },
+                    colors = SuggestionChipDefaults.suggestionChipColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.dp, sanaColors.cardBorder)
+                )
+            }
+        }
+
+        HorizontalDivider(color = sanaColors.cardBorder)
+
+        // Speech-to-Text Listening / Error Banner
+        AnimatedVisibility(
+            visible = speechController.isListening || !speechController.errorMessage.isNullOrBlank()
+        ) {
+            val speechErr = speechController.errorMessage
+            Surface(
+                color = if (speechController.isListening) sanaColors.tealTint else sanaColors.errorSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (!speechController.isListening && !speechErr.isNullOrBlank()) {
+                            Modifier.clickable { speechController.dismissError() }
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .testTag(
+                        if (speechController.isListening) "speech_listening_banner" else "speech_error_banner"
+                    )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (speechController.isListening) {
+                        Icon(
+                            imageVector = Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = sanaColors.tealDeep,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = stringResource(R.string.speech_listening),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = sanaColors.tealDeep,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = { speechController.stopListening() },
+                            modifier = Modifier.testTag("speech_stop_button")
+                        ) {
+                            Text(
+                                text = stringResource(R.string.speech_stop),
+                                color = sanaColors.errorText
+                            )
+                        }
+                    } else if (!speechErr.isNullOrBlank()) {
+                        Text(
+                            text = speechErr,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = sanaColors.errorText,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Text Input Field (with Microphone Button) + Send Button
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = inputText,
+                onValueChange = { inputText = it },
+                placeholder = {
+                    Text(
+                        text = stringResource(R.string.chat_placeholder),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                trailingIcon = {
+                    IconButton(
+                        onClick = {
+                            if (!speechController.isListening) {
+                                ttsController.stop()
+                                dictationBaseText = inputText
+                            }
+                            speechController.toggleListening()
+                        },
+                        enabled = !isSending,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("chat_mic_button")
+                    ) {
+                        Icon(
+                            imageVector = if (speechController.isListening) {
+                                Icons.Filled.Stop
+                            } else {
+                                Icons.Filled.Mic
+                            },
+                            contentDescription = if (speechController.isListening) {
+                                stringResource(R.string.mic_stop_cd)
+                            } else {
+                                stringResource(R.string.mic_start_cd)
+                            },
+                            tint = if (speechController.isListening) {
+                                sanaColors.errorText
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
+                },
+                singleLine = false,
+                maxLines = 4,
+                shape = RoundedCornerShape(16.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = if (speechController.isListening) {
+                        sanaColors.tealAccent
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    unfocusedBorderColor = if (speechController.isListening) {
+                        sanaColors.tealAccent
+                    } else {
+                        sanaColors.cardBorder
+                    },
+                    focusedContainerColor = sanaColors.chatCanvas,
+                    unfocusedContainerColor = sanaColors.chatCanvas
+                ),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(
+                    onSend = {
+                        if (inputText.isNotBlank() && !isSending) {
+                            speechController.stopListening()
+                            dictationBaseText = ""
+                            onSendMessage(inputText)
+                            inputText = ""
+                        }
+                    }
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("chat_input_field")
+            )
+
+            IconButton(
+                onClick = {
+                    if (inputText.isNotBlank() && !isSending) {
+                        speechController.stopListening()
+                        dictationBaseText = ""
+                        onSendMessage(inputText)
+                        inputText = ""
+                    }
+                },
+                enabled = inputText.isNotBlank() && !isSending,
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    disabledContainerColor = sanaColors.cardBorder,
+                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
+                modifier = Modifier
+                    .size(50.dp)
+                    .minimumInteractiveComponentSize()
+                    .testTag("chat_send_button")
+            ) {
+                if (isSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = stringResource(R.string.send_cd)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatWelcomeEmptyState(
+    preferredName: String? = null,
+    modifier: Modifier = Modifier
+) {
+    val sanaColors = LocalSanaColors.current
+    val cleanName = preferredName?.trim()?.takeIf { it.isNotEmpty() }
+    val greetingText = if (cleanName != null) {
+        stringResource(R.string.greeting_personalized_format, cleanName)
+    } else {
+        stringResource(R.string.greeting_default)
+    }
+    Card(
+        modifier = modifier.widthIn(max = 420.dp),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, sanaColors.cardBorder)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(sanaColors.tealTint),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AutoAwesome,
+                    contentDescription = null,
+                    tint = sanaColors.tealDeep
+                )
+            }
+            Text(
+                text = greetingText,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.testTag("chat_welcome_greeting")
+            )
+            Text(
+                text = "اسألني أي سؤال، أو اختر وضع «تلخيص» أو «ترجمة»، أو أضف صفحات ونصوصًا في تبويب «تعلّم ذاتي» وسأجيبك منها مباشرة مع ذكر المصدر.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChatBubbleItem(
+    message: ChatDisplayMessage,
+    isSpeaking: Boolean = false,
+    onToggleSpeak: (() -> Unit)? = null
+) {
+    val sanaColors = LocalSanaColors.current
+    val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+    var copied by remember(message.id) { mutableStateOf(false) }
+    var showContextMenu by remember(message.id) { mutableStateOf(false) }
+
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2000L)
+            copied = false
+        }
+    }
+
+    val bubbleShape = RoundedCornerShape(
+        topStart = 18.dp,
+        topEnd = 18.dp,
+        bottomStart = if (message.isUser) 18.dp else 6.dp,
+        bottomEnd = if (message.isUser) 6.dp else 18.dp
+    )
+
+    val context = LocalContext.current
+    val copyAction = {
+        clipboard.setText(AnnotatedString(message.text))
+        copied = true
+    }
+    val shareAction = {
+        val snippet = formatShareSnippet(message)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, context.getString(R.string.share_snippet_subject))
+            putExtra(Intent.EXTRA_TEXT, snippet)
+        }
+        val chooserIntent = Intent.createChooser(
+            shareIntent,
+            context.getString(R.string.share_snippet_chooser_title)
+        ).apply {
+            if (context !is Activity) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+        try {
+            context.startActivity(chooserIntent)
+        } catch (_: ActivityNotFoundException) {
+            // Ignore when no share handler is available
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Box {
+            Surface(
+                shape = bubbleShape,
+                color = if (message.isUser) sanaColors.userBubble else MaterialTheme.colorScheme.surface,
+                border = when {
+                    message.isUser -> null
+                    isSpeaking -> BorderStroke(1.5.dp, sanaColors.tealAccent)
+                    else -> BorderStroke(1.dp, sanaColors.cardBorder)
+                },
+                modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .clip(bubbleShape)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            showContextMenu = true
+                        }
+                    )
+                    .testTag(if (message.isUser) "chat_user_bubble" else "chat_ai_bubble")
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = if (message.isUser) "أنت" else "سنا · Gemini",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = if (message.isUser) {
+                                sanaColors.onUserBubble.copy(alpha = 0.78f)
+                            } else {
+                                sanaColors.tealDeep
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (copied) {
+                            Text(
+                                text = stringResource(R.string.message_copied),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (message.isUser) {
+                                    sanaColors.onUserBubble.copy(alpha = 0.85f)
+                                } else {
+                                    sanaColors.tealDeep
+                                }
+                            )
+                        }
+                        if (onToggleSpeak != null) {
+                            IconButton(
+                                onClick = onToggleSpeak,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("tts_button_${message.id}")
+                            ) {
+                                Icon(
+                                    imageVector = if (isSpeaking) {
+                                        Icons.Filled.StopCircle
+                                    } else {
+                                        Icons.AutoMirrored.Filled.VolumeUp
+                                    },
+                                    contentDescription = if (isSpeaking) {
+                                        stringResource(R.string.tts_stop_cd)
+                                    } else {
+                                        stringResource(R.string.tts_listen_cd)
+                                    },
+                                    tint = if (isSpeaking) {
+                                        sanaColors.tealAccent
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = copyAction,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("copy_message_${message.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                                contentDescription = stringResource(R.string.copy_message_cd),
+                                tint = when {
+                                    copied && message.isUser -> sanaColors.onUserBubble
+                                    copied -> sanaColors.tealDeep
+                                    message.isUser -> sanaColors.onUserBubble.copy(alpha = 0.78f)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = shareAction,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("share_message_${message.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Share,
+                                contentDescription = stringResource(R.string.share_message_cd),
+                                tint = if (message.isUser) {
+                                    sanaColors.onUserBubble.copy(alpha = 0.78f)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    if (message.isUser) {
+                        Text(
+                            text = message.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = sanaColors.onUserBubble
+                        )
+                    } else {
+                        SanaMarkdownText(
+                            markdown = message.text,
+                            textColor = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    if (isSpeaking && !message.isUser) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = sanaColors.tealTint,
+                            modifier = Modifier
+                                .semantics(mergeDescendants = true) {}
+                                .testTag("tts_speaking_badge_${message.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                    contentDescription = null,
+                                    tint = sanaColors.tealDeep,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = stringResource(R.string.tts_speaking_badge),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = sanaColors.tealDeep
+                                )
+                            }
+                        }
+                    }
+
+                    if (!message.isUser && !message.sourceTitle.isNullOrBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = sanaColors.tealTint
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Bookmark,
+                                    contentDescription = null,
+                                    tint = sanaColors.tealDeep,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = "المصدر: ${message.sourceTitle}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = sanaColors.tealDeep
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            DropdownMenu(
+                expanded = showContextMenu,
+                onDismissRequest = { showContextMenu = false },
+                modifier = Modifier.testTag("bubble_context_menu_${message.id}")
+            ) {
+                if (onToggleSpeak != null) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (isSpeaking) {
+                                    stringResource(R.string.tts_stop_action)
+                                } else {
+                                    stringResource(R.string.tts_listen_action)
+                                }
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (isSpeaking) {
+                                    Icons.Filled.StopCircle
+                                } else {
+                                    Icons.AutoMirrored.Filled.VolumeUp
+                                },
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            onToggleSpeak()
+                            showContextMenu = false
+                        },
+                        modifier = Modifier.testTag("tts_menu_item_${message.id}")
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.copy_message_action)) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.ContentCopy,
+                            contentDescription = null
+                        )
+                    },
+                    onClick = {
+                        copyAction()
+                        showContextMenu = false
+                    },
+                    modifier = Modifier.testTag("copy_message_menu_item_${message.id}")
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.share_message_action)) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.Share,
+                            contentDescription = null
+                        )
+                    },
+                    onClick = {
+                        showContextMenu = false
+                        shareAction()
+                    },
+                    modifier = Modifier.testTag("share_message_menu_item_${message.id}")
+                )
+            }
+        }
+    }
+}
+
+internal fun formatShareSnippet(message: ChatDisplayMessage): String {
+    val speaker = if (message.isUser) "أنت" else "سنا"
+    val body = message.text.trim()
+    val sourceLine = message.sourceTitle
+        ?.takeIf { it.isNotBlank() }
+        ?.let { "\nالمصدر: $it" }
+        .orEmpty()
+    return "$speaker:\n$body$sourceLine"
+}
+
+@Composable
+private fun StreamingBubbleItem(
+    text: String,
+    sourceTitle: String?
+) {
+    val sanaColors = LocalSanaColors.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Surface(
+            shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 6.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, sanaColors.tealAccent),
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .testTag("chat_streaming_bubble")
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "سنا · Gemini",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = sanaColors.tealDeep
+                    )
+                    TypingDotsIndicator(
+                        dotColor = sanaColors.tealAccent,
+                        modifier = Modifier.testTag("chat_typing_dots")
+                    )
+                }
+
+                if (text.isBlank()) {
+                    Text(
+                        text = stringResource(R.string.ai_typing_status),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("chat_typing_status_text")
+                    )
+                } else {
+                    SanaMarkdownText(
+                        markdown = text,
+                        textColor = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                if (!sourceTitle.isNullOrBlank()) {
+                    Text(
+                        text = "المصدر: $sourceTitle",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = sanaColors.tealDeep
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypingDotsIndicator(
+    dotColor: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "sana_typing_dots")
+    val dotOffsets = List(3) { index ->
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = -6f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = 420,
+                    easing = FastOutSlowInEasing
+                ),
+                repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset(index * 140)
+            ),
+            label = "typing_dot_offset_$index"
+        )
+    }
+    val dotAlphas = List(3) { index ->
+        transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = 420,
+                    easing = FastOutSlowInEasing
+                ),
+                repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset(index * 140)
+            ),
+            label = "typing_dot_alpha_$index"
+        )
+    }
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(3) { index ->
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .graphicsLayer {
+                        translationY = dotOffsets[index].value
+                        alpha = dotAlphas[index].value
+                    }
+                    .clip(CircleShape)
+                    .background(dotColor)
+            )
+        }
+    }
+}

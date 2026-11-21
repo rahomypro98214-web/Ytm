@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "KnowledgeSource": {
+      "title": "KnowledgeSource",
+      "description": "A learned article, webpage, or pasted note stored in Sana's user-scoped knowledge base.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "title": { "type": "string", "description": "Display title of the source." },
+        "sourceLabel": { "type": "string", "description": "Short attribution label or domain." },
+        "sourceUrl": { "type": "string", "description": "Optional URL if fetched from the web." },
+        "sourceType": { "type": "string", "enum": ["site", "text", "url"], "description": "Source origin category." },
+        "summary": { "type": "string", "description": "AI-extracted concise Arabic summary." },
+        "content": { "type": "string", "description": "Full cleaned text content." },
+        "keywords": { "type": "array", "description": "Up to 10 extracted topic keywords." },
+        "factCount": { "type": "integer", "description": "Number of extracted facts or sentences." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "title", "sourceLabel", "sourceType", "summary", "content", "keywords", "factCount", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "A single conversational turn in Sana's Arabic AI chat.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "role": { "type": "string", "enum": ["user", "model"], "description": "Message author role." },
+        "text": { "type": "string", "description": "Message content (Markdown supported for model)." },
+        "sourceTitle": { "type": "string", "description": "Optional cited KnowledgeSource title." },
+        "mode": { "type": "string", "enum": ["chat", "summarize", "translate", "kb"], "description": "Optional assistant mode." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "role", "text", "createdAt"]
+    },
+    "CourseProgress": {
+      "title": "CourseProgress",
+      "description": "User progress and best quiz score for an interactive course.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "completedLessons": { "type": "array", "description": "List of completed lesson indices." },
+        "quizBestScore": { "type": "integer", "description": "Highest quiz score achieved." },
+        "quizTotal": { "type": "integer", "description": "Total number of quiz questions." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "completedLessons", "createdAt", "updatedAt"]
+    },
+    "CustomCourse": {
+      "title": "CustomCourse",
+      "description": "An AI-generated interactive course with lessons and quiz questions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "title": { "type": "string", "description": "Course title." },
+        "description": { "type": "string", "description": "Short course summary." },
+        "iconEmoji": { "type": "string", "description": "Emoji icon for the course card." },
+        "lessons": { "type": "array", "description": "List of lesson maps {title, body}." },
+        "quiz": { "type": "array", "description": "List of quiz question maps {question, options, correctIndex, explanation}." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "title", "description", "iconEmoji", "lessons", "quiz", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/knowledgeSources/{sourceId}": {
+      "schema": { "$ref": "#/entities/KnowledgeSource" },
+      "description": "User-scoped knowledge base documents learned by Sana."
+    },
+    "/users/{userId}/chatMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "User-scoped AI chat message history."
+    },
+    "/users/{userId}/courseProgress/{courseId}": {
+      "schema": { "$ref": "#/entities/CourseProgress" },
+      "description": "User-scoped course lesson completion and quiz scores."
+    },
+    "/users/{userId}/customCourses/{courseId}": {
+      "schema": { "$ref": "#/entities/CustomCourse" },
+      "description": "User-scoped AI-generated interactive courses."
+    }
+  }
+}
