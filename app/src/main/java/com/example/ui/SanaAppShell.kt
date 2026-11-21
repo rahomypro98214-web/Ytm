@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AutoFixHigh
@@ -457,26 +459,33 @@ fun SanaAppShell(
                         containerColor = MaterialTheme.colorScheme.surface,
                         modifier = Modifier.fillMaxHeight()
                     ) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        SanaTab.entries.forEach { tab ->
-                            val selected = selectedTab == tab
-                            NavigationRailItem(
-                                selected = selected,
-                                onClick = { viewModel.selectTab(tab) },
-                                icon = {
-                                    Icon(
-                                        imageVector = tabIcon(tab, selected),
-                                        contentDescription = tab.label
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = tab.label,
-                                        style = MaterialTheme.typography.labelMedium
-                                    )
-                                },
-                                modifier = Modifier.testTag("rail_tab_${tab.name.lowercase()}")
-                            )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            SanaTab.entries.forEach { tab ->
+                                val selected = selectedTab == tab
+                                NavigationRailItem(
+                                    selected = selected,
+                                    onClick = { viewModel.selectTab(tab) },
+                                    icon = {
+                                        Icon(
+                                            imageVector = tabIcon(tab, selected),
+                                            contentDescription = tab.label
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = tab.label,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("rail_tab_${tab.name.lowercase()}")
+                                )
+                            }
                         }
                     }
                 }

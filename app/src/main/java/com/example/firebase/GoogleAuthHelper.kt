@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val WEB_CLIENT_ID =
     "1025768180782-24ie3jkoh5n4lbv1pv6sjb4b0fbl6mf3.apps.googleusercontent.com"
@@ -59,7 +60,10 @@ fun attemptAutoSignIn(
         .build()
     scope.launch {
         try {
-            val cred = credentialManager.getCredential(context, request).credential
+            val response = withTimeoutOrNull(2500L) {
+                credentialManager.getCredential(context, request)
+            }
+            val cred = response?.credential
             if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
                 Firebase.auth.signInWithCredential(
@@ -71,7 +75,10 @@ fun attemptAutoSignIn(
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (oom: OutOfMemoryError) {
+            throw oom
+        } catch (t: Throwable) {
+            Log.w("Auth", "Auto sign-in skipped: ${t.message}")
             onUnauthenticated()
         }
     }
@@ -117,9 +124,11 @@ fun onGoogleSignInClicked(
             onAuthError("خدمة تسجيل الدخول بحساب Google غير مدعومة على هذا الجهاز.")
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            Log.e("Auth", "Google Sign-In failed", e)
-            onAuthError(e.localizedMessage ?: "فشل تسجيل الدخول بحساب Google.")
+        } catch (oom: OutOfMemoryError) {
+            throw oom
+        } catch (t: Throwable) {
+            Log.e("Auth", "Google Sign-In failed", t)
+            onAuthError(t.localizedMessage ?: "فشل تسجيل الدخول بحساب Google.")
         }
     }
 }

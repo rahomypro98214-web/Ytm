@@ -146,70 +146,79 @@ fun rememberTextToSpeechController(): TextToSpeechController {
 
     DisposableEffect(appContext) {
         isDisposed = false
-        lateinit var engine: TextToSpeech
-        engine = TextToSpeech(appContext) { status ->
-            mainHandler.post {
-                if (isDisposed) return@post
-                if (status == TextToSpeech.SUCCESS) {
-                    isInitialized = true
-                    initFailed = false
-                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(utteranceId: String?) {
-                            if (utteranceId == null) return
-                            val baseId = utteranceId.substringBefore("_part_")
-                            mainHandler.post { speakingMessageId = baseId }
-                        }
+        var engine: TextToSpeech? = null
+        val created = runCatching {
+            lateinit var localEngine: TextToSpeech
+            localEngine = TextToSpeech(appContext) { status ->
+                mainHandler.post {
+                    if (isDisposed) return@post
+                    if (status == TextToSpeech.SUCCESS) {
+                        isInitialized = true
+                        initFailed = false
+                        localEngine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                            override fun onStart(utteranceId: String?) {
+                                if (utteranceId == null) return
+                                val baseId = utteranceId.substringBefore("_part_")
+                                mainHandler.post { speakingMessageId = baseId }
+                            }
 
-                        override fun onDone(utteranceId: String?) {
-                            if (utteranceId == null || utteranceId.contains("_part_")) return
-                            mainHandler.post {
-                                if (speakingMessageId == utteranceId) {
-                                    speakingMessageId = null
+                            override fun onDone(utteranceId: String?) {
+                                if (utteranceId == null || utteranceId.contains("_part_")) return
+                                mainHandler.post {
+                                    if (speakingMessageId == utteranceId) {
+                                        speakingMessageId = null
+                                    }
                                 }
                             }
-                        }
 
-                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                            if (utteranceId == null) return
-                            val baseId = utteranceId.substringBefore("_part_")
-                            mainHandler.post {
-                                if (speakingMessageId == baseId) {
-                                    speakingMessageId = null
+                            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                                if (utteranceId == null) return
+                                val baseId = utteranceId.substringBefore("_part_")
+                                mainHandler.post {
+                                    if (speakingMessageId == baseId) {
+                                        speakingMessageId = null
+                                    }
                                 }
                             }
-                        }
 
-                        @Deprecated("Deprecated in Java")
-                        override fun onError(utteranceId: String?) {
-                            mainHandler.post {
-                                speakingMessageId = null
-                                errorMessage = appContext.getString(R.string.tts_error_speaking)
+                            @Deprecated("Deprecated in Java")
+                            override fun onError(utteranceId: String?) {
+                                mainHandler.post {
+                                    speakingMessageId = null
+                                    errorMessage = appContext.getString(R.string.tts_error_speaking)
+                                }
                             }
-                        }
 
-                        override fun onError(utteranceId: String?, errorCode: Int) {
-                            Log.w(TTS_TAG, "TTS error code: $errorCode")
-                            mainHandler.post {
-                                speakingMessageId = null
-                                errorMessage = appContext.getString(R.string.tts_error_speaking)
+                            override fun onError(utteranceId: String?, errorCode: Int) {
+                                Log.w(TTS_TAG, "TTS error code: $errorCode")
+                                mainHandler.post {
+                                    speakingMessageId = null
+                                    errorMessage = appContext.getString(R.string.tts_error_speaking)
+                                }
                             }
+                        })
+                        val pending = pendingUtterance
+                        if (pending != null) {
+                            pendingUtterance = null
+                            speakInternal(localEngine, pending.first, pending.second)
                         }
-                    })
-                    val pending = pendingUtterance
-                    if (pending != null) {
-                        pendingUtterance = null
-                        speakInternal(engine, pending.first, pending.second)
-                    }
-                } else {
-                    isInitialized = false
-                    initFailed = true
-                    if (pendingUtterance != null) {
-                        pendingUtterance = null
-                        speakingMessageId = null
-                        errorMessage = appContext.getString(R.string.tts_not_available)
+                    } else {
+                        isInitialized = false
+                        initFailed = true
+                        if (pendingUtterance != null) {
+                            pendingUtterance = null
+                            speakingMessageId = null
+                            errorMessage = appContext.getString(R.string.tts_not_available)
+                        }
                     }
                 }
             }
+            localEngine
+        }
+        engine = created.getOrNull()
+        if (engine == null) {
+            Log.w(TTS_TAG, "Unable to initialize TextToSpeech engine", created.exceptionOrNull())
+            initFailed = true
         }
         ttsInstance = engine
 
@@ -219,8 +228,8 @@ fun rememberTextToSpeechController(): TextToSpeechController {
             pendingUtterance = null
             speakingMessageId = null
             runCatching {
-                engine.stop()
-                engine.shutdown()
+                engine?.stop()
+                engine?.shutdown()
             }
             ttsInstance = null
         }

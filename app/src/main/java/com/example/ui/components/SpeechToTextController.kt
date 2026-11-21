@@ -79,7 +79,9 @@ fun rememberSpeechToTextController(
     var ignoreNextCancelError by remember { mutableStateOf(false) }
 
     val speechRecognizer = remember(context) {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
+        val available = runCatching { SpeechRecognizer.isRecognitionAvailable(context) }
+            .getOrDefault(false)
+        if (available) {
             runCatching { SpeechRecognizer.createSpeechRecognizer(context) }.getOrNull()
         } else {
             null

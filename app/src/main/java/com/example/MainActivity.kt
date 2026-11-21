@@ -41,6 +41,8 @@ import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.OnboardingScreen
 import com.example.ui.theme.SanaTheme
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
@@ -67,21 +69,30 @@ class MainActivity : ComponentActivity() {
 fun SanaAppRoot() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val auth = remember { Firebase.auth }
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val auth: FirebaseAuth? = remember(context) {
+        runCatching {
+            if (FirebaseApp.getApps(context).isEmpty()) {
+                FirebaseApp.initializeApp(context)
+            }
+            Firebase.auth
+        }.getOrNull()
+    }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
     val userPrefsRepo = remember(context) { UserPreferencesRepository(context) }
 
     val hasCompletedOnboarding by userPrefsRepo.hasCompletedOnboarding
         .collectAsStateWithLifecycle(initialValue = null)
     var showOnboardingReplay by remember { mutableStateOf(false) }
 
-    val currentUser by auth.authStateFlow()
-        .collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val currentUser by (auth?.authStateFlow() ?: kotlinx.coroutines.flow.flowOf(null))
+        .collectAsStateWithLifecycle(initialValue = auth?.currentUser)
 
-    var autoSignInChecked by remember { mutableStateOf(auth.currentUser != null) }
+    var autoSignInChecked by remember { mutableStateOf(auth == null || auth.currentUser != null) }
 
-    LaunchedEffect(Unit) {
-        if (auth.currentUser == null) {
+    LaunchedEffect(auth, credentialManager) {
+        if (auth != null && auth.currentUser == null && credentialManager != null) {
             attemptAutoSignIn(
                 context = context,
                 credentialManager = credentialManager,
@@ -89,12 +100,14 @@ fun SanaAppRoot() {
                 onUnauthenticated = { autoSignInChecked = true },
                 scope = this
             )
+        } else {
+            autoSignInChecked = true
         }
     }
 
     val user = currentUser
     val onboardingDone = hasCompletedOnboarding
-    if (onboardingDone == null || (!autoSignInChecked && user == null)) {
+    if (onboardingDone == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
@@ -107,6 +120,10 @@ fun SanaAppRoot() {
                 }
             }
         )
+    } else if (!autoSignInChecked && user == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
     } else if (user == null) {
         AuthScreen(onAuthSuccess = { })
     } else {
@@ -125,7 +142,7 @@ fun SanaAppRoot() {
                             conversationDao = sanaDb.chatConversationDao()
                         )
                         SanaViewModel(
-                            firestoreRepo = SanaFirestoreRepository(db = db, auth = auth),
+                            firestoreRepo = SanaFirestoreRepository(db = db, auth = checkNotNull(auth)),
                             aiRepo = SanaAiRepository(),
                             localChatRepo = localChatRepo,
                             currentUserId = uid,

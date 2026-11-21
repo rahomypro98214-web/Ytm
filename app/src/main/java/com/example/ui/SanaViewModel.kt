@@ -163,7 +163,13 @@ class SanaViewModel(
                     Log.w(TAG, "Background chat sync error", firestoreError ?: error)
                 }
                 .collect { remoteMessages ->
-                    localChatRepo.syncFromRemote(currentUserId, remoteMessages)
+                    try {
+                        localChatRepo.syncFromRemote(currentUserId, remoteMessages)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error syncing remote chat messages locally", e)
+                    }
                 }
         }
     }

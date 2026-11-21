@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -9,13 +10,14 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.local.DEFAULT_CONVERSATION_ID
-import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
 private val Context.sanaUserPreferencesDataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "sana_user_preferences"
+    name = "sana_user_preferences",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
 )
 
 class UserPreferencesRepository(
@@ -25,11 +27,8 @@ class UserPreferencesRepository(
 
     val hasCompletedOnboarding: Flow<Boolean> = dataStore.data
         .catch { exception ->
-            if (exception is IOException) {
-                emit(emptyPreferences())
-            } else {
-                throw exception
-            }
+            if (exception is CancellationException) throw exception
+            emit(emptyPreferences())
         }
         .map { prefs ->
             prefs[ONBOARDING_COMPLETED_KEY] ?: false
@@ -43,11 +42,8 @@ class UserPreferencesRepository(
 
     val preferredName: Flow<String?> = dataStore.data
         .catch { exception ->
-            if (exception is IOException) {
-                emit(emptyPreferences())
-            } else {
-                throw exception
-            }
+            if (exception is CancellationException) throw exception
+            emit(emptyPreferences())
         }
         .map { prefs ->
             prefs[PREFERRED_NAME_KEY]
@@ -59,11 +55,8 @@ class UserPreferencesRepository(
         val key = activeConversationKey(userId)
         return dataStore.data
             .catch { exception ->
-                if (exception is IOException) {
-                    emit(emptyPreferences())
-                } else {
-                    throw exception
-                }
+                if (exception is CancellationException) throw exception
+                emit(emptyPreferences())
             }
             .map { prefs ->
                 prefs[key]?.takeIf { it.isNotBlank() } ?: DEFAULT_CONVERSATION_ID

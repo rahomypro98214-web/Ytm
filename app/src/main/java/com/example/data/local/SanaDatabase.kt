@@ -25,6 +25,27 @@ abstract class SanaDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE chat_messages ADD COLUMN conversationId TEXT NOT NULL DEFAULT '$DEFAULT_CONVERSATION_ID'"
                 )
+                // Drop any legacy indices from earlier v1 builds so Room schema validation succeeds cleanly.
+                val legacyIndices = mutableListOf<String>()
+                db.query("PRAGMA index_list('chat_messages')").use { cursor ->
+                    val nameIdx = cursor.getColumnIndex("name")
+                    val originIdx = cursor.getColumnIndex("origin")
+                    while (cursor.moveToNext()) {
+                        val idxName = if (nameIdx >= 0) cursor.getString(nameIdx) else null
+                        val origin = if (originIdx >= 0) cursor.getString(originIdx) else "c"
+                        if (!idxName.isNullOrBlank() &&
+                            !idxName.startsWith("sqlite_autoindex_") &&
+                            origin != "pk" &&
+                            idxName != "index_chat_messages_userId_conversationId"
+                        ) {
+                            legacyIndices.add(idxName)
+                        }
+                    }
+                }
+                legacyIndices.forEach { oldIndex ->
+                    val escaped = oldIndex.replace("\"", "\"\"")
+                    db.execSQL("DROP INDEX IF EXISTS \"$escaped\"")
+                }
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_chat_messages_userId_conversationId " +
                         "ON chat_messages (userId, conversationId)"
@@ -77,6 +98,7 @@ abstract class SanaDatabase : RoomDatabase() {
                     "sana_local.db"
                 )
                     .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
