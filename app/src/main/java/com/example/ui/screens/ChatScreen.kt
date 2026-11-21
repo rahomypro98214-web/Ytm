@@ -43,12 +43,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkAdded
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
@@ -108,6 +111,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.R
+import com.example.data.local.ChatConversationEntity
+import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.local.SanaDatabase
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatMode
@@ -115,8 +120,10 @@ import com.example.data.model.UiState
 import com.example.data.repository.LocalChatRepository
 import com.example.data.repository.UserPreferencesRepository
 import com.example.ui.SanaViewModel
+import com.example.ui.components.ConversationHistorySheet
 import com.example.ui.components.PromptOfTheDayCarousel
 import com.example.ui.components.SanaMarkdownText
+import com.example.ui.components.SaveConversationDialog
 import com.example.ui.components.SettingsMenuDialog
 import com.example.ui.components.TextToSpeechController
 import com.example.ui.components.mergeDictatedText
@@ -127,12 +134,15 @@ import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.content
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -173,23 +183,46 @@ class FirebaseChatViewModel(
         )
     }
 
-    val messages: StateFlow<List<ChatDisplayMessage>> =
-        localChatRepo.observeMessages(LOCAL_CHAT_USER_ID)
-            .map { entities ->
-                entities.map { entity ->
-                    ChatDisplayMessage(
-                        id = entity.remoteId?.takeIf { it.isNotBlank() } ?: "local_${entity.localId}",
-                        isUser = entity.role == "user",
-                        text = entity.text,
-                        sourceTitle = entity.sourceTitle
-                    )
-                }
-            }
+    private val _activeConversationId = MutableStateFlow(DEFAULT_CONVERSATION_ID)
+    val activeConversationId: StateFlow<String> = _activeConversationId.asStateFlow()
+
+    val savedConversations: StateFlow<List<ChatConversationEntity>> =
+        localChatRepo.observeConversations(LOCAL_CHAT_USER_ID)
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5000L),
                 initialValue = emptyList()
             )
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val messages: StateFlow<List<ChatDisplayMessage>> =
+        _activeConversationId.flatMapLatest { convId ->
+            localChatRepo.observeMessages(LOCAL_CHAT_USER_ID, convId)
+                .map { entities ->
+                    entities.map { entity ->
+                        ChatDisplayMessage(
+                            id = entity.remoteId?.takeIf { it.isNotBlank() } ?: "local_${entity.localId}",
+                            isUser = entity.role == "user",
+                            text = entity.text,
+                            sourceTitle = entity.sourceTitle
+                        )
+                    }
+                }
+        }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000L),
+                initialValue = emptyList()
+            )
+
+    init {
+        if (userPreferencesRepo != null) {
+            viewModelScope.launch {
+                val restoredId = userPreferencesRepo.activeConversationId(LOCAL_CHAT_USER_ID).first()
+                _activeConversationId.value = restoredId
+            }
+        }
+    }
 
     private val _streamingText = MutableStateFlow<String?>(null)
     val streamingText: StateFlow<String?> = _streamingText.asStateFlow()
@@ -205,9 +238,54 @@ class FirebaseChatViewModel(
     }
 
     fun clearMessages() {
+        val conversationId = _activeConversationId.value
         _error.value = null
         viewModelScope.launch {
-            localChatRepo.clearMessages(LOCAL_CHAT_USER_ID)
+            localChatRepo.clearMessages(LOCAL_CHAT_USER_ID, conversationId)
+        }
+    }
+
+    fun saveCurrentConversation(title: String) {
+        val sourceId = _activeConversationId.value
+        viewModelScope.launch {
+            val savedId = localChatRepo.saveConversation(
+                userId = LOCAL_CHAT_USER_ID,
+                sourceConversationId = sourceId,
+                customTitle = title
+            )
+            _activeConversationId.value = savedId
+            userPreferencesRepo?.setActiveConversationId(LOCAL_CHAT_USER_ID, savedId)
+        }
+    }
+
+    fun selectConversation(conversationId: String) {
+        _error.value = null
+        _activeConversationId.value = conversationId
+        userPreferencesRepo?.let { repo ->
+            viewModelScope.launch {
+                repo.setActiveConversationId(LOCAL_CHAT_USER_ID, conversationId)
+            }
+        }
+    }
+
+    fun startNewConversation() {
+        _error.value = null
+        val newId = localChatRepo.createNewConversationId()
+        _activeConversationId.value = newId
+        userPreferencesRepo?.let { repo ->
+            viewModelScope.launch {
+                repo.setActiveConversationId(LOCAL_CHAT_USER_ID, newId)
+            }
+        }
+    }
+
+    fun deleteConversation(conversationId: String) {
+        viewModelScope.launch {
+            localChatRepo.deleteConversation(LOCAL_CHAT_USER_ID, conversationId)
+            if (_activeConversationId.value == conversationId) {
+                _activeConversationId.value = DEFAULT_CONVERSATION_ID
+                userPreferencesRepo?.setActiveConversationId(LOCAL_CHAT_USER_ID, DEFAULT_CONVERSATION_ID)
+            }
         }
     }
 
@@ -229,6 +307,7 @@ class FirebaseChatViewModel(
         val text = rawText.trim()
         if (text.isEmpty() || _isSending.value) return
 
+        val conversationId = _activeConversationId.value
         val historySnapshot = messages.value
         _isSending.value = true
         _error.value = null
@@ -238,7 +317,8 @@ class FirebaseChatViewModel(
             localChatRepo.insertMessage(
                 userId = LOCAL_CHAT_USER_ID,
                 role = "user",
-                text = text
+                text = text,
+                conversationId = conversationId
             )
 
             val accumulated = StringBuilder()
@@ -261,7 +341,8 @@ class FirebaseChatViewModel(
                     localChatRepo.insertMessage(
                         userId = LOCAL_CHAT_USER_ID,
                         role = "model",
-                        text = accumulated.toString()
+                        text = accumulated.toString(),
+                        conversationId = conversationId
                     )
                 } else {
                     _error.value = "لم يُرجِع النموذج نصًا. حاول مرة أخرى."
@@ -285,8 +366,12 @@ class FirebaseChatViewModel(
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = checkNotNull(this[APPLICATION_KEY])
+                val sanaDb = SanaDatabase.getInstance(app)
                 FirebaseChatViewModel(
-                    localChatRepo = LocalChatRepository(SanaDatabase.getInstance(app).chatMessageDao()),
+                    localChatRepo = LocalChatRepository(
+                        chatMessageDao = sanaDb.chatMessageDao(),
+                        conversationDao = sanaDb.chatConversationDao()
+                    ),
                     userPreferencesRepo = UserPreferencesRepository(app)
                 )
             }
@@ -307,6 +392,8 @@ fun ChatScreen(
     val isSending by chatViewModel.isSending.collectAsStateWithLifecycle()
     val error by chatViewModel.error.collectAsStateWithLifecycle()
     val preferredName by chatViewModel.preferredName.collectAsStateWithLifecycle()
+    val savedConversations by chatViewModel.savedConversations.collectAsStateWithLifecycle()
+    val activeConversationId by chatViewModel.activeConversationId.collectAsStateWithLifecycle()
 
     ChatScreenContent(
         messagesState = UiState.Success(messages),
@@ -328,7 +415,13 @@ fun ChatScreen(
         modifier = modifier,
         preferredName = preferredName,
         onUpdatePreferredName = { chatViewModel.updatePreferredName(it) },
-        onClearPreferredName = { chatViewModel.clearPreferredName() }
+        onClearPreferredName = { chatViewModel.clearPreferredName() },
+        savedConversations = savedConversations,
+        activeConversationId = activeConversationId,
+        onSaveConversation = { chatViewModel.saveCurrentConversation(it) },
+        onSelectConversation = { chatViewModel.selectConversation(it) },
+        onStartNewConversation = { chatViewModel.startNewConversation() },
+        onDeleteConversation = { chatViewModel.deleteConversation(it) }
     )
 }
 
@@ -347,6 +440,8 @@ fun ChatScreen(
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
     val chatError by viewModel.chatError.collectAsStateWithLifecycle()
     val preferredName by viewModel.preferredName.collectAsStateWithLifecycle()
+    val savedConversations by viewModel.savedConversations.collectAsStateWithLifecycle()
+    val activeConversationId by viewModel.activeConversationId.collectAsStateWithLifecycle()
 
     val mappedState: UiState<List<ChatDisplayMessage>> = remember(messagesState) {
         when (val state = messagesState) {
@@ -377,7 +472,13 @@ fun ChatScreen(
         modifier = modifier,
         preferredName = preferredName,
         onUpdatePreferredName = { viewModel.updatePreferredName(it) },
-        onClearPreferredName = { viewModel.clearPreferredName() }
+        onClearPreferredName = { viewModel.clearPreferredName() },
+        savedConversations = savedConversations,
+        activeConversationId = activeConversationId,
+        onSaveConversation = { viewModel.saveCurrentConversation(it) },
+        onSelectConversation = { viewModel.selectConversation(it) },
+        onStartNewConversation = { viewModel.startNewConversation() },
+        onDeleteConversation = { viewModel.deleteConversation(it) }
     )
 }
 
@@ -406,7 +507,13 @@ internal fun ChatScreenContent(
     ttsController: TextToSpeechController = rememberTextToSpeechController(),
     preferredName: String? = null,
     onUpdatePreferredName: ((String) -> Unit)? = null,
-    onClearPreferredName: (() -> Unit)? = null
+    onClearPreferredName: (() -> Unit)? = null,
+    savedConversations: List<ChatConversationEntity> = emptyList(),
+    activeConversationId: String = DEFAULT_CONVERSATION_ID,
+    onSaveConversation: ((String) -> Unit)? = null,
+    onSelectConversation: ((String) -> Unit)? = null,
+    onStartNewConversation: (() -> Unit)? = null,
+    onDeleteConversation: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val sanaColors = LocalSanaColors.current
@@ -416,6 +523,8 @@ internal fun ChatScreenContent(
     var showClearDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showChatOptionsMenu by remember { mutableStateOf(false) }
+    var showHistorySheet by remember { mutableStateOf(false) }
+    var showSaveConversationDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     val speechController = rememberSpeechToTextController(
@@ -507,14 +616,51 @@ internal fun ChatScreenContent(
         )
     }
 
+    if (showHistorySheet && onSelectConversation != null) {
+        ConversationHistorySheet(
+            conversations = savedConversations,
+            activeConversationId = activeConversationId,
+            hasActiveMessages = messages.isNotEmpty(),
+            onSelectConversation = { convId ->
+                ttsController.stop()
+                onSelectConversation(convId)
+            },
+            onStartNewConversation = {
+                ttsController.stop()
+                onStartNewConversation?.invoke()
+            },
+            onRequestSaveCurrent = {
+                showHistorySheet = false
+                showSaveConversationDialog = true
+            },
+            onDeleteConversation = { convId ->
+                onDeleteConversation?.invoke(convId)
+            },
+            onDismiss = { showHistorySheet = false }
+        )
+    }
+
+    if (showSaveConversationDialog && onSaveConversation != null) {
+        val suggestedTitle = remember(messages, savedConversations, activeConversationId) {
+            savedConversations.firstOrNull { it.conversationId == activeConversationId }?.title
+                ?: messages.firstOrNull { it.isUser }?.text?.take(44)
+                ?: ""
+        }
+        SaveConversationDialog(
+            initialTitle = suggestedTitle,
+            onSave = { title -> onSaveConversation(title) },
+            onDismiss = { showSaveConversationDialog = false }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(sanaColors.chatCanvas)
             .imePadding()
     ) {
-        // Top Mode Selector + Overflow Menu (Settings / Export / Clear Chat History)
-        if (onSelectMode != null || onUpdatePreferredName != null || messages.isNotEmpty()) {
+        // Top Mode Selector + History + Overflow Menu
+        if (onSelectMode != null || onUpdatePreferredName != null || onSelectConversation != null || messages.isNotEmpty()) {
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 tonalElevation = 1.dp
@@ -561,6 +707,21 @@ internal fun ChatScreenContent(
                             }
                         }
 
+                        if (onSelectConversation != null) {
+                            IconButton(
+                                onClick = { showHistorySheet = true },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("chat_history_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.History,
+                                    contentDescription = stringResource(R.string.chat_history_cd),
+                                    tint = sanaColors.tealDeep
+                                )
+                            }
+                        }
+
                         Box {
                             IconButton(
                                 onClick = { showChatOptionsMenu = true },
@@ -579,6 +740,56 @@ internal fun ChatScreenContent(
                                 expanded = showChatOptionsMenu,
                                 onDismissRequest = { showChatOptionsMenu = false }
                             ) {
+                                if (onSelectConversation != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.chat_history_title)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.History,
+                                                contentDescription = null
+                                            )
+                                        },
+                                        onClick = {
+                                            showChatOptionsMenu = false
+                                            showHistorySheet = true
+                                        },
+                                        modifier = Modifier.testTag("open_history_menu_item")
+                                    )
+                                    if (onSaveConversation != null) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.save_conversation)) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Filled.BookmarkAdded,
+                                                    contentDescription = null
+                                                )
+                                            },
+                                            enabled = messages.isNotEmpty(),
+                                            onClick = {
+                                                showChatOptionsMenu = false
+                                                showSaveConversationDialog = true
+                                            },
+                                            modifier = Modifier.testTag("save_conversation_menu_item")
+                                        )
+                                    }
+                                    if (onStartNewConversation != null) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.new_conversation)) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Filled.AddComment,
+                                                    contentDescription = null
+                                                )
+                                            },
+                                            onClick = {
+                                                showChatOptionsMenu = false
+                                                ttsController.stop()
+                                                onStartNewConversation()
+                                            },
+                                            modifier = Modifier.testTag("new_conversation_menu_item")
+                                        )
+                                    }
+                                }
                                 if (onUpdatePreferredName != null) {
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.settings_title)) },

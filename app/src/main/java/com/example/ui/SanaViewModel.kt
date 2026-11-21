@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.local.ChatConversationEntity
 import com.example.data.local.ChatMessageEntity
+import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatMode
 import com.example.data.model.CourseProgress
@@ -23,12 +25,15 @@ import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
 import java.util.Date
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -95,11 +100,26 @@ class SanaViewModel(
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), UiState.Loading)
 
-    val chatMessagesState: StateFlow<UiState<List<ChatMessage>>> =
-        localChatRepo.observeMessages(currentUserId)
-            .map<List<ChatMessageEntity>, UiState<List<ChatMessage>>> { entities ->
-                UiState.Success(entities.map { it.toChatMessage() })
+    private val _activeConversationId = MutableStateFlow(DEFAULT_CONVERSATION_ID)
+    val activeConversationId: StateFlow<String> = _activeConversationId.asStateFlow()
+
+    val savedConversations: StateFlow<List<ChatConversationEntity>> =
+        localChatRepo.observeConversations(currentUserId)
+            .catch { error ->
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Error observing saved conversations", error)
+                emit(emptyList())
             }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val chatMessagesState: StateFlow<UiState<List<ChatMessage>>> =
+        _activeConversationId.flatMapLatest { convId ->
+            localChatRepo.observeMessages(currentUserId, convId)
+                .map<List<ChatMessageEntity>, UiState<List<ChatMessage>>> { entities ->
+                    UiState.Success(entities.map { it.toChatMessage() })
+                }
+        }
             .catch { error ->
                 if (error is CancellationException) throw error
                 Log.w(TAG, "Error observing local chatMessages", error)
@@ -108,6 +128,12 @@ class SanaViewModel(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), UiState.Loading)
 
     init {
+        if (userPreferencesRepo != null) {
+            viewModelScope.launch {
+                val restoredId = userPreferencesRepo.activeConversationId(currentUserId).first()
+                _activeConversationId.value = restoredId
+            }
+        }
         viewModelScope.launch {
             firestoreRepo.observeChatMessages(currentUserId)
                 .catch { error ->
@@ -228,11 +254,57 @@ class SanaViewModel(
         }
     }
 
+    fun saveCurrentConversation(title: String) {
+        val sourceId = _activeConversationId.value
+        viewModelScope.launch {
+            val savedId = localChatRepo.saveConversation(
+                userId = currentUserId,
+                sourceConversationId = sourceId,
+                customTitle = title
+            )
+            _activeConversationId.value = savedId
+            userPreferencesRepo?.setActiveConversationId(currentUserId, savedId)
+        }
+    }
+
+    fun selectConversation(conversationId: String) {
+        _chatError.value = null
+        _activeConversationId.value = conversationId
+        userPreferencesRepo?.let { repo ->
+            viewModelScope.launch {
+                repo.setActiveConversationId(currentUserId, conversationId)
+            }
+        }
+    }
+
+    fun startNewConversation() {
+        _chatError.value = null
+        val newId = localChatRepo.createNewConversationId()
+        _activeConversationId.value = newId
+        userPreferencesRepo?.let { repo ->
+            viewModelScope.launch {
+                repo.setActiveConversationId(currentUserId, newId)
+            }
+        }
+    }
+
+    fun deleteConversation(conversationId: String) {
+        viewModelScope.launch {
+            localChatRepo.deleteConversation(currentUserId, conversationId)
+            if (_activeConversationId.value == conversationId) {
+                val fallbackId = DEFAULT_CONVERSATION_ID
+                _activeConversationId.value = fallbackId
+                userPreferencesRepo?.setActiveConversationId(currentUserId, fallbackId)
+            }
+        }
+    }
+
     fun sendMessage(rawText: String) {
         val messageText = rawText.trim()
         if (messageText.isEmpty() || _isSending.value) return
 
         val mode = _chatMode.value
+        val conversationId = _activeConversationId.value
         val currentMessages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
         val kb = (knowledgeSourcesState.value as? UiState.Success)?.data ?: emptyList()
 
@@ -247,7 +319,8 @@ class SanaViewModel(
                     userId = currentUserId,
                     role = "user",
                     text = messageText,
-                    mode = mode.key
+                    mode = mode.key,
+                    conversationId = conversationId
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -259,16 +332,18 @@ class SanaViewModel(
                 return@launch
             }
 
-            viewModelScope.launch {
-                val saveUserResult = firestoreRepo.addChatMessage(
-                    role = "user",
-                    text = messageText,
-                    mode = mode.key
-                )
-                saveUserResult.onSuccess { remoteId ->
-                    localChatRepo.markSynced(localUserId, remoteId)
-                }.onFailure { err ->
-                    Log.w(TAG, "Cloud sync for user message failed", err)
+            if (conversationId == DEFAULT_CONVERSATION_ID) {
+                viewModelScope.launch {
+                    val saveUserResult = firestoreRepo.addChatMessage(
+                        role = "user",
+                        text = messageText,
+                        mode = mode.key
+                    )
+                    saveUserResult.onSuccess { remoteId ->
+                        localChatRepo.markSynced(localUserId, remoteId)
+                    }.onFailure { err ->
+                        Log.w(TAG, "Cloud sync for user message failed", err)
+                    }
                 }
             }
 
@@ -294,19 +369,22 @@ class SanaViewModel(
                         role = "model",
                         text = finalReply,
                         sourceTitle = finalSource,
-                        mode = mode.key
+                        mode = mode.key,
+                        conversationId = conversationId
                     )
-                    viewModelScope.launch {
-                        val saveModelResult = firestoreRepo.addChatMessage(
-                            role = "model",
-                            text = finalReply,
-                            sourceTitle = finalSource,
-                            mode = mode.key
-                        )
-                        saveModelResult.onSuccess { remoteId ->
-                            localChatRepo.markSynced(localModelId, remoteId)
-                        }.onFailure { err ->
-                            Log.w(TAG, "Cloud sync for model message failed", err)
+                    if (conversationId == DEFAULT_CONVERSATION_ID) {
+                        viewModelScope.launch {
+                            val saveModelResult = firestoreRepo.addChatMessage(
+                                role = "model",
+                                text = finalReply,
+                                sourceTitle = finalSource,
+                                mode = mode.key
+                            )
+                            saveModelResult.onSuccess { remoteId ->
+                                localChatRepo.markSynced(localModelId, remoteId)
+                            }.onFailure { err ->
+                                Log.w(TAG, "Cloud sync for model message failed", err)
+                            }
                         }
                     }
                 }
@@ -324,15 +402,18 @@ class SanaViewModel(
     }
 
     fun clearChatHistory() {
+        val conversationId = _activeConversationId.value
         val messages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
         _chatError.value = null
         viewModelScope.launch {
-            localChatRepo.clearMessages(currentUserId)
-            val remoteIds = messages.map { it.id }.filter { !it.startsWith("local_") }
-            if (remoteIds.isNotEmpty()) {
-                val result = firestoreRepo.clearChatHistory(remoteIds)
-                if (result.isFailure) {
-                    Log.w(TAG, "Failed to clear remote chat history", result.exceptionOrNull())
+            localChatRepo.clearMessages(currentUserId, conversationId)
+            if (conversationId == DEFAULT_CONVERSATION_ID) {
+                val remoteIds = messages.map { it.id }.filter { !it.startsWith("local_") }
+                if (remoteIds.isNotEmpty()) {
+                    val result = firestoreRepo.clearChatHistory(remoteIds)
+                    if (result.isFailure) {
+                        Log.w(TAG, "Failed to clear remote chat history", result.exceptionOrNull())
+                    }
                 }
             }
         }

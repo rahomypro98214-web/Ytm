@@ -100,7 +100,11 @@ fun SanaAppRoot() {
                         val app = checkNotNull(this[APPLICATION_KEY])
                         val databaseId = app.getString(R.string.firestore_database_id)
                         val db = FirebaseFirestore.getInstance(databaseId)
-                        val localChatRepo = LocalChatRepository(SanaDatabase.getInstance(app).chatMessageDao())
+                        val sanaDb = SanaDatabase.getInstance(app)
+                        val localChatRepo = LocalChatRepository(
+                            chatMessageDao = sanaDb.chatMessageDao(),
+                            conversationDao = sanaDb.chatConversationDao()
+                        )
                         val userPrefsRepo = UserPreferencesRepository(app)
                         SanaViewModel(
                             firestoreRepo = SanaFirestoreRepository(db = db, auth = auth),

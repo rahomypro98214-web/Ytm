@@ -73,4 +73,14 @@
     <string name="studio_play_reel">تشغيل المعاينة المتحركة</string>
     <string name="studio_pause_reel">إيقاف المعاينة</string>
     <string name="studio_share_script">مشاركة السيناريو</string>
+    <string name="chat_history_cd">سجل المحادثات المحفوظة</string>
+    <string name="chat_history_title">المحادثات المحفوظة</string>
+    <string name="chat_history_empty">لا توجد محادثات محفوظة بعد. ستُحفظ محادثاتك تلقائيًا هنا لتتمكن من استرجاعها لاحقًا.</string>
+    <string name="new_conversation">محادثة جديدة</string>
+    <string name="save_conversation">حفظ المحادثة</string>
+    <string name="save_conversation_title">حفظ المحادثة في السجل</string>
+    <string name="save_conversation_label">عنوان المحادثة</string>
+    <string name="save_conversation_placeholder">مثال: ملخص درس الفيزياء، خطة السفر…</string>
+    <string name="conversation_saved_badge">الحالية</string>
+    <string name="delete_conversation_cd">حذف المحادثة</string>
 </resources>
