@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +56,9 @@ import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.firebase.onGoogleSignInClicked
 import com.example.ui.theme.LocalSanaColors
+import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.auth
 
 @Composable
 fun AuthScreen(
@@ -62,11 +66,22 @@ fun AuthScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
     val sanaColors = LocalSanaColors.current
 
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(context) {
+        val existingUser = runCatching {
+            if (FirebaseApp.getApps(context).isNotEmpty()) Firebase.auth.currentUser else null
+        }.getOrNull()
+        if (existingUser != null) {
+            onAuthSuccess()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -212,11 +227,16 @@ fun AuthScreen(
 
                         Button(
                             onClick = {
+                                val cm = credentialManager
+                                if (cm == null) {
+                                    errorMessage = "خدمة تسجيل الدخول بحساب Google غير مدعومة على هذا الجهاز."
+                                    return@Button
+                                }
                                 errorMessage = null
                                 isLoading = true
                                 onGoogleSignInClicked(
                                     context = context,
-                                    credentialManager = credentialManager,
+                                    credentialManager = cm,
                                     onAuthSuccess = {
                                         isLoading = false
                                         onAuthSuccess()

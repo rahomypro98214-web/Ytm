@@ -3,9 +3,6 @@
     <string name="sana_tagline">ذكاء يفهم لغتك، ويتعلم، ويعلّمك.</string>
     <string name="sana_subtitle">مساعد ذكي بالعربية مدعوم بـ Gemini: يحادثك، ويتعلم من صفحات الويب ونصوصك، ويعلّمك بدروس واختبارات تفاعلية.</string>
     <string name="sign_in_google">تسجيل الدخول بحساب Google</string>
-    <string name="tab_chat">محادثة</string>
-    <string name="tab_learn">تعلَّم</string>
-    <string name="tab_self_learn">تعلّم ذاتي</string>
     <string name="chat_placeholder">اسأل سنا أو اطلب تلخيصًا أو ترجمة…</string>
     <string name="send_cd">إرسال</string>
     <string name="sign_out">تسجيل الخروج</string>
@@ -53,7 +50,6 @@
     <string name="prompt_of_day_cta">اسأل سنا</string>
     <string name="prompt_of_day_toggle_hide">إخفاء اقتراحات اليوم</string>
     <string name="prompt_of_day_toggle_show">عرض اقتراحات اليوم</string>
-    <string name="tab_studio">إبداع</string>
     <string name="studio_title">استوديو سنا للصور والفيديو</string>
     <string name="studio_tab_images">إنشاء الصور</string>
     <string name="studio_tab_video">إنشاء الفيديو</string>
@@ -99,4 +95,21 @@
     <string name="search_chat_history_clear_cd">مسح البحث</string>
     <string name="search_chat_history_empty_format">لا توجد نتائج مطابقة لـ «%1$s» في سجل المحادثات.</string>
     <string name="search_chat_history_results_format">نتائج البحث (%1$d)</string>
+    <string name="chat_quiz_title">اختبار من المحادثة</string>
+    <string name="chat_quiz_quick_chip">اختبر نفسك من المحادثة</string>
+    <string name="chat_quiz_menu_item">توليد اختبار من المحادثة</string>
+    <string name="chat_quiz_close_cd">إغلاق الاختبار</string>
+    <string name="chat_quiz_generating">جارٍ توليد أسئلة الاختبار من سياق المحادثة…</string>
+    <string name="chat_quiz_generating_subtitle">تحلّل سنا أحدث رسائل المحادثة وتُعدّ أسئلة اختيار من متعدد تفاعلية مع التفسير.</string>
+    <string name="chat_quiz_score_format">النقاط: %1$d</string>
+    <string name="chat_quiz_question_counter_format">سؤال %1$d من %2$d</string>
+    <string name="chat_quiz_correct_badge">إجابة صحيحة! أحسنت</string>
+    <string name="chat_quiz_incorrect_badge">إجابة غير صحيحة</string>
+    <string name="chat_quiz_next">السؤال التالي</string>
+    <string name="chat_quiz_show_result">عرض النتيجة</string>
+    <string name="chat_quiz_restart">إعادة الاختبار</string>
+    <string name="chat_quiz_regenerate">أسئلة جديدة</string>
+    <string name="chat_quiz_ask_sana">اسأل سنا عن هذا السؤال</string>
+    <string name="chat_quiz_review_heading">مراجعة الإجابات</string>
+    <string name="chat_quiz_retry">إعادة المحاولة</string>
 </resources>

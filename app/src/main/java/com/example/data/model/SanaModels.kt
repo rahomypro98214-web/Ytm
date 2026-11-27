@@ -115,6 +115,35 @@ data class QuizQuestion(
     val explanation: String
 )
 
+data class ChatContextQuiz(
+    val topicTitle: String,
+    val topicSummary: String,
+    val questions: List<QuizQuestion>
+)
+
+sealed interface ChatQuizUiState {
+    data object Hidden : ChatQuizUiState
+    data class Generating(val streamingPreview: String? = null) : ChatQuizUiState
+    data class Ready(
+        val quiz: ChatContextQuiz,
+        val currentIndex: Int = 0,
+        val selectedOptions: Map<Int, Int> = emptyMap(),
+        val showSummary: Boolean = false
+    ) : ChatQuizUiState {
+        val currentQuestion: QuizQuestion?
+            get() = quiz.questions.getOrNull(currentIndex)
+        val selectedOptionForCurrent: Int?
+            get() = selectedOptions[currentIndex]
+        val score: Int
+            get() = quiz.questions.indices.count { idx ->
+                selectedOptions[idx] == quiz.questions[idx].correctIndex
+            }
+        val answeredCount: Int
+            get() = selectedOptions.size
+    }
+    data class Error(val message: String) : ChatQuizUiState
+}
+
 data class CourseUi(
     val id: String,
     val iconEmoji: String,

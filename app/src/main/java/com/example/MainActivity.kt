@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -22,7 +23,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -68,6 +72,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SanaAppRoot() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val auth: FirebaseAuth? = remember(context) {
         runCatching {
@@ -86,21 +91,50 @@ fun SanaAppRoot() {
         .collectAsStateWithLifecycle(initialValue = null)
     var showOnboardingReplay by remember { mutableStateOf(false) }
 
-    val currentUser by (auth?.authStateFlow() ?: kotlinx.coroutines.flow.flowOf(null))
-        .collectAsStateWithLifecycle(initialValue = auth?.currentUser)
+    var currentUser by remember(auth) { mutableStateOf(auth?.currentUser) }
+    var autoSignInChecked by remember(auth) { mutableStateOf(auth == null || auth.currentUser != null) }
 
-    var autoSignInChecked by remember { mutableStateOf(auth == null || auth.currentUser != null) }
+    LaunchedEffect(auth) {
+        if (auth != null) {
+            currentUser = auth.currentUser
+            auth.authStateFlow().collect { updatedUser ->
+                currentUser = updatedUser
+            }
+        } else {
+            currentUser = null
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, auth) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && auth != null) {
+                val activeUser = auth.currentUser
+                if (activeUser?.uid != currentUser?.uid) {
+                    currentUser = activeUser
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(auth, credentialManager) {
         if (auth != null && auth.currentUser == null && credentialManager != null) {
             attemptAutoSignIn(
                 context = context,
                 credentialManager = credentialManager,
-                onAuthSuccess = { autoSignInChecked = true },
-                onUnauthenticated = { autoSignInChecked = true },
+                onAuthSuccess = {
+                    currentUser = auth.currentUser
+                    autoSignInChecked = true
+                },
+                onUnauthenticated = {
+                    currentUser = auth.currentUser
+                    autoSignInChecked = true
+                },
                 scope = this
             )
         } else {
+            currentUser = auth?.currentUser
             autoSignInChecked = true
         }
     }
@@ -125,7 +159,12 @@ fun SanaAppRoot() {
             CircularProgressIndicator()
         }
     } else if (user == null) {
-        AuthScreen(onAuthSuccess = { })
+        AuthScreen(
+            onAuthSuccess = {
+                currentUser = auth?.currentUser
+                autoSignInChecked = true
+            }
+        )
     } else {
         val uid = user.uid
         key(uid) {
@@ -154,7 +193,7 @@ fun SanaAppRoot() {
             SanaAppShell(
                 viewModel = viewModel,
                 userDisplayName = user.displayName ?: user.email,
-                onSignedOut = { },
+                onSignedOut = { currentUser = auth?.currentUser },
                 onReplayOnboarding = { showOnboardingReplay = true }
             )
         }

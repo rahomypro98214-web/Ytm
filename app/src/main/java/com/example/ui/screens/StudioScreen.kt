@@ -86,6 +86,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.graphics.scale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.model.UiState
@@ -958,11 +959,9 @@ private fun decodeSampledBitmap(context: Context, uri: Uri): Bitmap? {
             sampled
         } else {
             val scale = maxDim.toFloat() / maxOf(sampled.width, sampled.height)
-            Bitmap.createScaledBitmap(
-                sampled,
+            sampled.scale(
                 (sampled.width * scale).toInt().coerceAtLeast(1),
-                (sampled.height * scale).toInt().coerceAtLeast(1),
-                true
+                (sampled.height * scale).toInt().coerceAtLeast(1)
             )
         }
     }.getOrNull()

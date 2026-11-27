@@ -10,10 +10,12 @@ import com.example.data.local.ChatMessageEntity
 import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatMode
+import com.example.data.model.ChatQuizUiState
 import com.example.data.model.CourseProgress
 import com.example.data.model.CourseUi
 import com.example.data.model.KnowledgeSource
 import com.example.data.model.PresetSite
+import com.example.data.model.QuizQuestion
 import com.example.data.model.StarterContent
 import com.example.data.model.UiState
 import com.example.data.repository.LocalChatRepository
@@ -270,6 +272,10 @@ class SanaViewModel(
     private val _studioSceneImages = MutableStateFlow<Map<Int, UiState<Bitmap>>>(emptyMap())
     val studioSceneImages: StateFlow<Map<Int, UiState<Bitmap>>> = _studioSceneImages.asStateFlow()
 
+    private val _chatQuizState = MutableStateFlow<ChatQuizUiState>(ChatQuizUiState.Hidden)
+    val chatQuizState: StateFlow<ChatQuizUiState> = _chatQuizState.asStateFlow()
+    private var activeQuizJob: Job? = null
+
     val activeCourse: StateFlow<CourseUi?> =
         combine(allCoursesState, _learnSession) { courses, session ->
             courses.firstOrNull { it.id == session.activeCourseId }
@@ -316,6 +322,7 @@ class SanaViewModel(
 
     fun selectConversation(conversationId: String) {
         _chatError.value = null
+        dismissChatQuiz()
         _activeConversationId.value = conversationId
         userPreferencesRepo?.let { repo ->
             viewModelScope.launch {
@@ -326,6 +333,7 @@ class SanaViewModel(
 
     fun startNewConversation() {
         _chatError.value = null
+        dismissChatQuiz()
         val newId = localChatRepo.createNewConversationId()
         _activeConversationId.value = newId
         userPreferencesRepo?.let { repo ->
@@ -491,6 +499,7 @@ class SanaViewModel(
         if (_streamingConversationId.value == conversationId) {
             stopChatGeneration()
         }
+        dismissChatQuiz()
         val messages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
         _chatError.value = null
         viewModelScope.launch {
@@ -505,6 +514,91 @@ class SanaViewModel(
                 }
             }
         }
+    }
+
+    fun startChatContextQuiz() {
+        val messages = (chatMessagesState.value as? UiState.Success)?.data ?: emptyList()
+        if (messages.none { it.text.isNotBlank() }) {
+            _chatQuizState.value = ChatQuizUiState.Error(
+                "ابدأ محادثة قصيرة مع سنا أولًا لتوليد اختبار تفاعلي من سياقها."
+            )
+            return
+        }
+        activeQuizJob?.cancel()
+        activeQuizJob = viewModelScope.launch {
+            _chatQuizState.value = ChatQuizUiState.Generating()
+            try {
+                val generated = aiRepo.generateQuizFromChatContext(
+                    recentMessages = messages,
+                    onStreamingProgress = { preview ->
+                        if (_chatQuizState.value is ChatQuizUiState.Generating) {
+                            _chatQuizState.value = ChatQuizUiState.Generating(preview)
+                        }
+                    }
+                )
+                _chatQuizState.value = ChatQuizUiState.Ready(quiz = generated)
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "Chat quiz generation timed out", e)
+                _chatQuizState.value = ChatQuizUiState.Error(formatAiErrorMessage(e))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Chat quiz generation failed", e)
+                _chatQuizState.value = ChatQuizUiState.Error(formatAiErrorMessage(e))
+            } finally {
+                activeQuizJob = null
+            }
+        }
+    }
+
+    fun selectChatQuizOption(optionIndex: Int) {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        if (current.showSummary) return
+        if (current.selectedOptions.containsKey(current.currentIndex)) return
+        val question = current.currentQuestion ?: return
+        if (optionIndex !in question.options.indices) return
+        _chatQuizState.value = current.copy(
+            selectedOptions = current.selectedOptions + (current.currentIndex to optionIndex)
+        )
+    }
+
+    fun nextChatQuizQuestion() {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        if (current.currentIndex < current.quiz.questions.lastIndex) {
+            _chatQuizState.value = current.copy(currentIndex = current.currentIndex + 1)
+        } else {
+            _chatQuizState.value = current.copy(showSummary = true)
+        }
+    }
+
+    fun restartChatQuiz() {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        _chatQuizState.value = current.copy(
+            currentIndex = 0,
+            selectedOptions = emptyMap(),
+            showSummary = false
+        )
+    }
+
+    fun dismissChatQuiz() {
+        activeQuizJob?.cancel()
+        activeQuizJob = null
+        _chatQuizState.value = ChatQuizUiState.Hidden
+    }
+
+    fun askSanaAboutQuizQuestion(question: QuizQuestion, chosenOption: Int?) {
+        dismissChatQuiz()
+        val correctText = question.options.getOrNull(question.correctIndex).orEmpty()
+        val chosenText = chosenOption?.let { question.options.getOrNull(it) }
+        val followUpPrompt = buildString {
+            append("اشرحي لي هذا السؤال من الاختبار بتفصيل أوضح مع مثال عملي: «${question.question}».")
+            if (chosenText != null && chosenOption != question.correctIndex) {
+                append(" اخترتُ «$chosenText» لكن الإجابة الصحيحة هي «$correctText».")
+            } else if (correctText.isNotBlank()) {
+                append(" الإجابة الصحيحة هي «$correctText».")
+            }
+        }
+        sendMessage(followUpPrompt)
     }
 
     fun buildExportChatText(): String {

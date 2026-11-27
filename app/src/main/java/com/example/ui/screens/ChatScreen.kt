@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
@@ -118,12 +119,16 @@ import com.example.data.local.DEFAULT_CONVERSATION_ID
 import com.example.data.local.SanaDatabase
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatMode
+import com.example.data.model.ChatQuizUiState
+import com.example.data.model.QuizQuestion
 import com.example.data.model.UiState
 import com.example.data.repository.LocalChatRepository
+import com.example.data.repository.SanaAiRepository
 import com.example.data.repository.UserPreferencesRepository
 import com.example.data.repository.formatAiErrorMessage
 import com.example.data.repository.isTransientOverloadError
 import com.example.ui.SanaViewModel
+import com.example.ui.components.ChatQuizSheet
 import com.example.ui.components.ConversationHistorySheet
 import com.example.ui.components.PromptOfTheDayCarousel
 import com.example.ui.components.SanaMarkdownText
@@ -175,7 +180,8 @@ data class ChatDisplayMessage(
  */
 class FirebaseChatViewModel(
     private val localChatRepo: LocalChatRepository,
-    private val userPreferencesRepo: UserPreferencesRepository? = null
+    private val userPreferencesRepo: UserPreferencesRepository? = null,
+    private val aiRepo: SanaAiRepository = SanaAiRepository()
 ) : ViewModel() {
     val preferredName: StateFlow<String?> =
         userPreferencesRepo?.preferredName
@@ -291,6 +297,10 @@ class FirebaseChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    private val _chatQuizState = MutableStateFlow<ChatQuizUiState>(ChatQuizUiState.Hidden)
+    val chatQuizState: StateFlow<ChatQuizUiState> = _chatQuizState.asStateFlow()
+    private var activeQuizJob: Job? = null
+
     fun dismissError() {
         _error.value = null
     }
@@ -308,6 +318,7 @@ class FirebaseChatViewModel(
         if (_streamingConversationId.value == conversationId) {
             stopGeneration()
         }
+        dismissChatQuiz()
         _error.value = null
         viewModelScope.launch {
             localChatRepo.clearMessages(LOCAL_CHAT_USER_ID, conversationId)
@@ -329,6 +340,7 @@ class FirebaseChatViewModel(
 
     fun selectConversation(conversationId: String) {
         _error.value = null
+        dismissChatQuiz()
         _activeConversationId.value = conversationId
         userPreferencesRepo?.let { repo ->
             viewModelScope.launch {
@@ -339,6 +351,7 @@ class FirebaseChatViewModel(
 
     fun startNewConversation() {
         _error.value = null
+        dismissChatQuiz()
         val newId = localChatRepo.createNewConversationId()
         _activeConversationId.value = newId
         userPreferencesRepo?.let { repo ->
@@ -346,6 +359,101 @@ class FirebaseChatViewModel(
                 repo.setActiveConversationId(LOCAL_CHAT_USER_ID, newId)
             }
         }
+    }
+
+    fun startChatContextQuiz() {
+        val currentMessages = messages.value
+            .filter { it.text.isNotBlank() }
+            .map { msg ->
+                ChatMessage(
+                    id = msg.id,
+                    userId = LOCAL_CHAT_USER_ID,
+                    role = if (msg.isUser) "user" else "model",
+                    text = msg.text,
+                    sourceTitle = msg.sourceTitle
+                )
+            }
+        if (currentMessages.isEmpty()) {
+            _chatQuizState.value = ChatQuizUiState.Error(
+                "ابدأ محادثة قصيرة مع سنا أولًا لتوليد اختبار تفاعلي من سياقها."
+            )
+            return
+        }
+        activeQuizJob?.cancel()
+        activeQuizJob = viewModelScope.launch {
+            _chatQuizState.value = ChatQuizUiState.Generating()
+            try {
+                val generated = aiRepo.generateQuizFromChatContext(
+                    recentMessages = currentMessages,
+                    onStreamingProgress = { preview ->
+                        if (_chatQuizState.value is ChatQuizUiState.Generating) {
+                            _chatQuizState.value = ChatQuizUiState.Generating(preview)
+                        }
+                    }
+                )
+                _chatQuizState.value = ChatQuizUiState.Ready(quiz = generated)
+            } catch (e: TimeoutCancellationException) {
+                Log.e(CHAT_TAG, "Chat quiz generation timed out", e)
+                _chatQuizState.value = ChatQuizUiState.Error(formatAiErrorMessage(e))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(CHAT_TAG, "Chat quiz generation failed", e)
+                _chatQuizState.value = ChatQuizUiState.Error(formatAiErrorMessage(e))
+            } finally {
+                activeQuizJob = null
+            }
+        }
+    }
+
+    fun selectChatQuizOption(optionIndex: Int) {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        if (current.showSummary) return
+        if (current.selectedOptions.containsKey(current.currentIndex)) return
+        val question = current.currentQuestion ?: return
+        if (optionIndex !in question.options.indices) return
+        _chatQuizState.value = current.copy(
+            selectedOptions = current.selectedOptions + (current.currentIndex to optionIndex)
+        )
+    }
+
+    fun nextChatQuizQuestion() {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        if (current.currentIndex < current.quiz.questions.lastIndex) {
+            _chatQuizState.value = current.copy(currentIndex = current.currentIndex + 1)
+        } else {
+            _chatQuizState.value = current.copy(showSummary = true)
+        }
+    }
+
+    fun restartChatQuiz() {
+        val current = _chatQuizState.value as? ChatQuizUiState.Ready ?: return
+        _chatQuizState.value = current.copy(
+            currentIndex = 0,
+            selectedOptions = emptyMap(),
+            showSummary = false
+        )
+    }
+
+    fun dismissChatQuiz() {
+        activeQuizJob?.cancel()
+        activeQuizJob = null
+        _chatQuizState.value = ChatQuizUiState.Hidden
+    }
+
+    fun askSanaAboutQuizQuestion(question: QuizQuestion, chosenOption: Int?) {
+        dismissChatQuiz()
+        val correctText = question.options.getOrNull(question.correctIndex).orEmpty()
+        val chosenText = chosenOption?.let { question.options.getOrNull(it) }
+        val followUpPrompt = buildString {
+            append("اشرحي لي هذا السؤال من الاختبار بتفصيل أوضح مع مثال عملي: «${question.question}».")
+            if (chosenText != null && chosenOption != question.correctIndex) {
+                append(" اخترتُ «$chosenText» لكن الإجابة الصحيحة هي «$correctText».")
+            } else if (correctText.isNotBlank()) {
+                append(" الإجابة الصحيحة هي «$correctText».")
+            }
+        }
+        sendMessage(followUpPrompt)
     }
 
     fun updateHistorySearchQuery(query: String) {
@@ -516,6 +624,7 @@ fun ChatScreen(
     val activeConversationId by chatViewModel.activeConversationId.collectAsStateWithLifecycle()
     val historySearchQuery by chatViewModel.historySearchQuery.collectAsStateWithLifecycle()
     val historySearchResults by chatViewModel.historySearchResults.collectAsStateWithLifecycle()
+    val chatQuizState by chatViewModel.chatQuizState.collectAsStateWithLifecycle()
 
     ChatScreenContent(
         messagesState = UiState.Success(messages),
@@ -547,7 +656,16 @@ fun ChatScreen(
         onStopGeneration = { chatViewModel.stopGeneration() },
         historySearchQuery = historySearchQuery,
         historySearchResults = historySearchResults,
-        onHistorySearchQueryChange = { chatViewModel.updateHistorySearchQuery(it) }
+        onHistorySearchQueryChange = { chatViewModel.updateHistorySearchQuery(it) },
+        chatQuizState = chatQuizState,
+        onStartChatQuiz = { chatViewModel.startChatContextQuiz() },
+        onSelectQuizOption = { chatViewModel.selectChatQuizOption(it) },
+        onNextQuizQuestion = { chatViewModel.nextChatQuizQuestion() },
+        onRestartChatQuiz = { chatViewModel.restartChatQuiz() },
+        onDismissChatQuiz = { chatViewModel.dismissChatQuiz() },
+        onAskAboutQuizQuestion = { question, chosen ->
+            chatViewModel.askSanaAboutQuizQuestion(question, chosen)
+        }
     )
 }
 
@@ -570,6 +688,7 @@ fun ChatScreen(
     val activeConversationId by viewModel.activeConversationId.collectAsStateWithLifecycle()
     val historySearchQuery by viewModel.historySearchQuery.collectAsStateWithLifecycle()
     val historySearchResults by viewModel.historySearchResults.collectAsStateWithLifecycle()
+    val chatQuizState by viewModel.chatQuizState.collectAsStateWithLifecycle()
 
     val mappedState: UiState<List<ChatDisplayMessage>> = remember(messagesState) {
         when (val state = messagesState) {
@@ -610,7 +729,16 @@ fun ChatScreen(
         onStopGeneration = { viewModel.stopChatGeneration() },
         historySearchQuery = historySearchQuery,
         historySearchResults = historySearchResults,
-        onHistorySearchQueryChange = { viewModel.updateHistorySearchQuery(it) }
+        onHistorySearchQueryChange = { viewModel.updateHistorySearchQuery(it) },
+        chatQuizState = chatQuizState,
+        onStartChatQuiz = { viewModel.startChatContextQuiz() },
+        onSelectQuizOption = { viewModel.selectChatQuizOption(it) },
+        onNextQuizQuestion = { viewModel.nextChatQuizQuestion() },
+        onRestartChatQuiz = { viewModel.restartChatQuiz() },
+        onDismissChatQuiz = { viewModel.dismissChatQuiz() },
+        onAskAboutQuizQuestion = { question, chosen ->
+            viewModel.askSanaAboutQuizQuestion(question, chosen)
+        }
     )
 }
 
@@ -650,7 +778,14 @@ internal fun ChatScreenContent(
     historySearchQuery: String = "",
     historySearchResults: List<ChatHistorySearchMatch> = emptyList(),
     onHistorySearchQueryChange: ((String) -> Unit)? = null,
-    speechController: SpeechToTextController? = null
+    speechController: SpeechToTextController? = null,
+    chatQuizState: ChatQuizUiState = ChatQuizUiState.Hidden,
+    onStartChatQuiz: (() -> Unit)? = null,
+    onSelectQuizOption: ((Int) -> Unit)? = null,
+    onNextQuizQuestion: (() -> Unit)? = null,
+    onRestartChatQuiz: (() -> Unit)? = null,
+    onDismissChatQuiz: (() -> Unit)? = null,
+    onAskAboutQuizQuestion: ((QuizQuestion, Int?) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val sanaColors = LocalSanaColors.current
@@ -854,6 +989,18 @@ internal fun ChatScreenContent(
         )
     }
 
+    if (chatQuizState !is ChatQuizUiState.Hidden) {
+        ChatQuizSheet(
+            quizState = chatQuizState,
+            onSelectOption = { idx -> onSelectQuizOption?.invoke(idx) },
+            onNextQuestion = { onNextQuizQuestion?.invoke() },
+            onRestartQuiz = { onRestartChatQuiz?.invoke() },
+            onRegenerateQuiz = { onStartChatQuiz?.invoke() },
+            onDismiss = { onDismissChatQuiz?.invoke() },
+            onAskAboutQuestion = onAskAboutQuizQuestion
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -908,6 +1055,25 @@ internal fun ChatScreenContent(
                             }
                         }
 
+                        if (onStartChatQuiz != null && messages.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    ttsController.stop()
+                                    onStartChatQuiz()
+                                },
+                                enabled = !isSending,
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("chat_quiz_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Quiz,
+                                    contentDescription = stringResource(R.string.chat_quiz_title),
+                                    tint = sanaColors.amberDeep
+                                )
+                            }
+                        }
+
                         if (onSelectConversation != null) {
                             IconButton(
                                 onClick = { showHistorySheet = true },
@@ -941,6 +1107,25 @@ internal fun ChatScreenContent(
                                 expanded = showChatOptionsMenu,
                                 onDismissRequest = { showChatOptionsMenu = false }
                             ) {
+                                if (onStartChatQuiz != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.chat_quiz_menu_item)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Filled.Quiz,
+                                                contentDescription = null,
+                                                tint = sanaColors.amberDeep
+                                            )
+                                        },
+                                        enabled = messages.isNotEmpty() && !isSending,
+                                        onClick = {
+                                            showChatOptionsMenu = false
+                                            ttsController.stop()
+                                            onStartChatQuiz()
+                                        },
+                                        modifier = Modifier.testTag("chat_quiz_menu_item")
+                                    )
+                                }
                                 if (onSelectConversation != null) {
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.chat_history_title)) },
@@ -1273,7 +1458,7 @@ internal fun ChatScreenContent(
             }
         }
 
-        // Quick Prompt Chips
+        // Quick Prompt Chips (+ Interactive Chat Quiz Action Chip)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1282,6 +1467,35 @@ internal fun ChatScreenContent(
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (onStartChatQuiz != null && messages.isNotEmpty()) {
+                SuggestionChip(
+                    onClick = {
+                        ttsController.stop()
+                        onStartChatQuiz()
+                    },
+                    enabled = !isSending,
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Filled.Quiz,
+                            contentDescription = null,
+                            tint = sanaColors.amberDeep,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    label = {
+                        Text(
+                            text = stringResource(R.string.chat_quiz_quick_chip),
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                            color = sanaColors.amberDeep
+                        )
+                    },
+                    colors = SuggestionChipDefaults.suggestionChipColors(
+                        containerColor = sanaColors.amberTint
+                    ),
+                    border = BorderStroke(1.dp, sanaColors.amberAccent),
+                    modifier = Modifier.testTag("chat_quick_quiz_chip")
+                )
+            }
             quickPrompts.forEach { prompt ->
                 SuggestionChip(
                     onClick = { onSendMessage(prompt) },

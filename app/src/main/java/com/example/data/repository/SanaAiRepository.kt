@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.example.data.model.ChatContextQuiz
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatMode
 import com.example.data.model.CourseUi
@@ -241,6 +242,49 @@ class SanaAiRepository {
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = courseSchema
+            }
+        )
+    }
+
+    private val chatQuizSchema by lazy {
+        Schema.obj(
+            properties = mapOf(
+                "topicTitle" to Schema.string(description = "عنوان عربي موجز لموضوع المحادثة الأخيرة (٣ إلى ٧ كلمات)"),
+                "topicSummary" to Schema.string(description = "جملة عربية واضحة تصف المحور المعرفي الذي يختبره المستخدم"),
+                "questions" to Schema.array(
+                    items = Schema.obj(
+                        properties = mapOf(
+                            "question" to Schema.string(description = "سؤال اختيار من متعدد بالعربية يختبر الفهم العملي لسياق المحادثة"),
+                            "options" to Schema.array(
+                                items = Schema.string(),
+                                description = "أربعة خيارات واضحة ومختلفة بالعربية بدون أحرف أو أرقام بادئة"
+                            ),
+                            "correctIndex" to Schema.integer(description = "فهرس الإجابة الصحيحة من 0 إلى 3"),
+                            "explanation" to Schema.string(description = "تفسير تعليمي موجز ومشجّع يوضح سبب صحة الإجابة")
+                        )
+                    ),
+                    description = "قائمة من 4 أسئلة اختيار من متعدد مبنية على سياق المحادثة الأخيرة"
+                )
+            )
+        )
+    }
+
+    private val chatQuizGeneratorModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = chatQuizSchema
+            }
+        )
+    }
+
+    private val fastChatQuizGeneratorModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = chatQuizSchema
             }
         )
     }
@@ -681,6 +725,67 @@ class SanaAiRepository {
         }
     }
 
+    suspend fun generateQuizFromChatContext(
+        recentMessages: List<ChatMessage>,
+        questionCount: Int = 4,
+        onStreamingProgress: (suspend (String) -> Unit)? = null
+    ): ChatContextQuiz = withContext(Dispatchers.IO) {
+        val contextMessages = recentMessages
+            .filter { it.text.isNotBlank() }
+            .takeLast(12)
+        if (contextMessages.isEmpty()) {
+            throw IllegalArgumentException("ابدأ محادثة قصيرة مع سنا أولًا لتوليد اختبار من سياقها.")
+        }
+
+        val transcript = buildString {
+            contextMessages.forEach { msg ->
+                val speaker = if (msg.role == "user") "المستخدم" else "سنا"
+                appendLine("$speaker: ${msg.text.trim().take(900)}")
+            }
+        }.trim()
+
+        val safeCount = questionCount.coerceIn(3, 5)
+        val prompt = """
+            أنتِ معلمة ذكية تصممين اختبارات تفاعلية ممتعة باللغة العربية الفصحى السلسة.
+            استنادًا إلى سياق المحادثة الأخيرة التالي بين المستخدم وسنا، أنشئي اختبار اختيار من متعدد مكوّنًا من $safeCount أسئلة دقيقة ومتنوعة:
+
+            === سياق المحادثة الأخيرة ===
+            $transcript
+            ==============================
+
+            الشروط:
+            - كل سؤال يختبر الفهم الحقيقي أو التطبيق العملي للمعلومات والمفاهيم الواردة في المحادثة.
+            - كل سؤال له 4 خيارات متقاربة المعقولية وواضحة، مع خيار واحد صحيح فقط وفهرس `correctIndex` من 0 إلى 3.
+            - تجنّبي وضع ترقيم أو حروف (مثل أ/ أو 1-) في بداية نصوص الخيارات.
+            - أرفقي مع كل سؤال تفسيرًا تعليميًا موجزًا يرسّخ المعلومة للمتعلم.
+        """.trimIndent()
+
+        try {
+            val jsonStr = generateWithFastFallback(
+                primary = chatQuizGeneratorModel,
+                fallback = fastChatQuizGeneratorModel,
+                prompt = prompt,
+                onPartialJson = onStreamingProgress?.let { callback ->
+                    { raw ->
+                        val preview = extractPartialStringField(raw, "topicSummary")
+                            ?: extractPartialStringField(raw, "topicTitle")
+                            ?: "جارٍ صياغة أسئلة تفاعلية من المحادثة…"
+                        callback(preview)
+                    }
+                }
+            )
+            parseChatQuizJson(jsonStr)
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Chat quiz generation timed out", e)
+            throw IllegalStateException("انتهت مهلة توليد الاختبار. تحقّق من الاتصال ثم أعد المحاولة.", e)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Chat quiz generation failed", e)
+            throw IllegalStateException(formatAiErrorMessage(e), e)
+        }
+    }
+
     suspend fun fetchWebPageText(rawUrl: String): Pair<String, String> = withContext(Dispatchers.IO) {
         val normalizedUrl = if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
             rawUrl.trim()
@@ -813,4 +918,49 @@ internal fun formatAiErrorMessage(error: Throwable): String {
         else ->
             "تعذر إتمام طلب الذكاء الاصطناعي حاليًا. اضغط «إعادة المحاولة»."
     }
+}
+
+internal fun parseChatQuizJson(jsonStr: String): ChatContextQuiz {
+    val json = JSONObject(jsonStr)
+    val topicTitle = json.optString("topicTitle").trim().ifBlank { "اختبار من المحادثة" }
+    val topicSummary = json.optString("topicSummary").trim()
+        .ifBlank { "أسئلة تفاعلية مولّدة استنادًا إلى أحدث ما دار في محادثتك مع سنا." }
+    val questionsArr = json.optJSONArray("questions")
+    val questions = buildList {
+        if (questionsArr != null) {
+            for (i in 0 until questionsArr.length()) {
+                val obj = questionsArr.optJSONObject(i) ?: continue
+                val qText = obj.optString("question").trim()
+                val optsArr = obj.optJSONArray("options")
+                val opts = buildList {
+                    if (optsArr != null) {
+                        for (j in 0 until optsArr.length()) {
+                            val opt = optsArr.optString(j).trim()
+                            if (opt.isNotBlank()) add(opt)
+                        }
+                    }
+                }
+                if (qText.isNotBlank() && opts.size >= 2) {
+                    val idx = obj.optInt("correctIndex", 0).coerceIn(0, opts.lastIndex)
+                    val exp = obj.optString("explanation").trim()
+                    add(
+                        QuizQuestion(
+                            question = qText,
+                            options = opts.take(4),
+                            correctIndex = idx,
+                            explanation = exp
+                        )
+                    )
+                }
+            }
+        }
+    }
+    if (questions.isEmpty()) {
+        throw IllegalStateException("تعذر استخراج أسئلة اختبار صالحة من هذه المحادثة. جرّب إضافة تفاصيل أكثر ثم أعد المحاولة.")
+    }
+    return ChatContextQuiz(
+        topicTitle = topicTitle,
+        topicSummary = topicSummary,
+        questions = questions
+    )
 }
